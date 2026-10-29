@@ -1,0 +1,13 @@
+{
+  "name": "@mabase/core",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test --timeout 180000",
+    "bench": "bun bench/query.ts"
+  },
+  "dependencies": {
+    "sift": "^17.1.4",
+    "zod": "^4.6.7"
+  }
+}
