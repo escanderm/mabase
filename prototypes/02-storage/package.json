@@ -1,0 +1,9 @@
+{
+  "name": "mabase-proto-02-storage",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test --timeout 180000",
+    "bench": "bun bench/bench.ts"
+  }
+}

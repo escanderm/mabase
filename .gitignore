@@ -1,0 +1,11 @@
+.DS_Store
+node_modules/
+dist/
+.tmp/
+.env*
+
+# данные и файлы, которые бинарник пишет сам при запуске
+mb_data/
+
+# тестовый npm-пакет прототипа 01 - нужен, чтобы повторить проверку
+!prototypes/01-binary-hooks/project/node_modules/

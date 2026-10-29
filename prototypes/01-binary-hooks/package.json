@@ -1,0 +1,13 @@
+{
+  "name": "01-binary-hooks",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "cd project && bun ../src/mabase.ts",
+    "build": "bun build --compile src/mabase.ts --outfile dist/mabase && codesign --remove-signature dist/mabase && codesign -s - dist/mabase",
+    "start": "cd project && ../dist/mabase"
+  },
+  "dependencies": {
+    "zod": "4.3.6"
+  }
+}
