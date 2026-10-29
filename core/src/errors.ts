@@ -84,3 +84,29 @@ export class DefinitionError extends Error {
     this.name = 'DefinitionError'
   }
 }
+
+// Ожидаемая ошибка действия: уходит клиенту с кодом и сообщением (design.md §10).
+export const ACTION_ERROR_STATUS = {
+  bad_request: 400,
+  unauthorized: 401,
+  forbidden: 403,
+  not_found: 404,
+  conflict: 409,
+} as const
+export type ActionErrorCode = keyof typeof ACTION_ERROR_STATUS
+
+export class ActionError extends Error {
+  constructor(
+    public code: ActionErrorCode,
+    message: string,
+    public details?: unknown,
+  ) {
+    super(message)
+    this.name = 'ActionError'
+    if (!(code in ACTION_ERROR_STATUS)) throw new TypeError(`ActionError: неизвестный код ${code}`)
+  }
+
+  get status(): number {
+    return ACTION_ERROR_STATUS[this.code]
+  }
+}

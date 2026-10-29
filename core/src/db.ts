@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { crashPoint } from './crash'
 import { Disk, type Data, type LogOp } from './disk'
 import {
+  DefinitionError,
   DepthError,
   DuplicateIdError,
   NotFoundError,
@@ -33,7 +34,11 @@ export type Hooks = {
 }
 export type CollectionDef = { schema?: Schema; indexes?: string[]; hooks?: Hooks }
 
-export type CommitInfo = { tx: number; ops: LogOp[]; holdMs: number }
+// Событие из транзакции. Уходит подписчикам onCommit только после коммита.
+export type TxEvent = { event: string; data: unknown }
+// events-only транзакция (без записей) получает tx = последний сохранённый номер.
+export type CommitInfo = { tx: number; ops: LogOp[]; holdMs: number; events: readonly TxEvent[] }
+export type EmitOptions = { after?: number | string; key?: string }
 export type HookErrorInfo = { where: string; collection?: string }
 
 export type DbOptions = {
@@ -53,6 +58,8 @@ class Tx {
   state: TxState = 'open'
   overlay = new Map<string, Map<string, Doc | null>>() // null = удалён в транзакции
   after: Array<{ collection: string; run: () => unknown }> = []
+  events: TxEvent[] = []
+  scheduled: Array<TxEvent & { runAt: number; key?: string }> = []
   abort = new AbortController()
   release: (() => void) | null = null
   acquiring: Promise<void> | null = null
@@ -63,7 +70,23 @@ class Tx {
 
 type Store = { tx: Tx; depth: number }
 
-export type TxApi = { c: Record<string, CollectionApi>; signal: AbortSignal }
+export type TxApi = {
+  c: Record<string, CollectionApi>
+  signal: AbortSignal
+  // Без after - событие подписчикам после коммита. С after - задача в _scheduled
+  // в той же строке лога (design.md §13); доставка - шаг 10.
+  emit: (event: string, data?: unknown, opts?: EmitOptions) => void
+}
+
+export const SCHEDULED = '_scheduled'
+
+// '0s', '500ms', '5m', '2h', '1d' или миллисекунды числом.
+export function parseDuration(v: number | string): number {
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v
+  const m = typeof v === 'string' ? /^(\d+)(ms|s|m|h|d)$/.exec(v) : null
+  if (!m) throw new QueryError(`after: непонятная длительность ${JSON.stringify(v)}, пример: '30s', '5m'`)
+  return Number(m[1]) * { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as 'ms']
+}
 
 const clone = <T>(v: T): T => structuredClone(v)
 
@@ -237,6 +260,7 @@ export class Db {
       )
     }
     for (const c of data.keys()) this.state(c)
+    this.collection(SCHEDULED, { indexes: ['key', 'runAt'] })
     this.c = new Proxy({} as Record<string, CollectionApi>, {
       get: (_, name) => (typeof name === 'string' ? new CollectionApi(this, name, null) : undefined),
     })
@@ -250,6 +274,7 @@ export class Db {
 
   collection(name: string, def: CollectionDef = {}): this {
     if (!name || name.includes('/')) throw new QueryError(`недопустимое имя коллекции "${name}"`)
+    if (name === SCHEDULED && this.defs.has(SCHEDULED)) throw new DefinitionError(`${SCHEDULED} - системная коллекция`)
     const fields = [...new Set(def.indexes ?? [])]
     checkIndexes(name, def.schema, fields)
     this.defs.set(name, def)
@@ -317,7 +342,41 @@ export class Db {
         get: (_, name) => (typeof name === 'string' ? new CollectionApi(this, name, tx) : undefined),
       }),
       signal: tx.abort.signal,
+      emit: (event, data = null, opts = {}) => {
+        this.ensureOpen(tx)
+        if (typeof event !== 'string' || event === '') throw new QueryError('emit: нужно имя события')
+        assertJson(data)
+        const frozen = deepFreeze(JSON.parse(JSON.stringify(data ?? null)))
+        if (opts.after === undefined) {
+          tx.events.push({ event, data: frozen })
+          return
+        }
+        if (opts.key !== undefined && (typeof opts.key !== 'string' || opts.key === '')) throw new QueryError('emit: key - непустая строка')
+        tx.scheduled.push({ event, data: frozen, runAt: Date.now() + parseDuration(opts.after), key: opts.key })
+      },
     }
+  }
+
+  // Отложенные события - обычные документы _scheduled в этой же транзакции.
+  // key: пока есть задача с этим ключом, новая не ставится.
+  private stageScheduled(tx: Tx): void {
+    const st = this.state(SCHEDULED)
+    const byKey = st.indexes.get('key')!
+    const taken = (key: string) => {
+      const ov = tx.overlay.get(SCHEDULED) // появляется после первой постановки
+      for (const id of byKey.eq(key)) if (!ov?.has(id)) return true
+      for (const d of ov?.values() ?? []) if (d?.key === key) return true
+      return false
+    }
+    for (const s of tx.scheduled) {
+      if (s.key !== undefined && taken(s.key)) continue
+      const id = ulid()
+      const now = Date.now()
+      const doc: Doc = { _id: id, event: s.event, data: s.data, runAt: s.runAt, attempts: 0, _createdAt: now, _updatedAt: now }
+      if (s.key !== undefined) doc.key = s.key
+      this.stage(tx, SCHEDULED, id, this.finalize(SCHEDULED, doc))
+    }
+    tx.scheduled = []
   }
 
   private ensureOpen(tx: Tx): void {
@@ -364,6 +423,10 @@ export class Db {
 
   private async commit(tx: Tx): Promise<void> {
     if (tx.state !== 'open') return // таймаут уже ответил вызывающему
+    if (tx.scheduled.length) {
+      await this.enter(tx) // запись в _scheduled - запись в базу, нужна очередь
+      this.stageScheduled(tx)
+    }
     if (tx.timer) clearTimeout(tx.timer)
 
     // Документы замораживаются: они уйдут в память и подписчикам onCommit,
@@ -379,9 +442,12 @@ export class Db {
           'Для больших удалений - мягкое удаление и дочистка пачками (design.md §10)',
       )
     }
+    const events = deepFreeze(tx.events)
     if (!tx.release || ops.length === 0) {
       tx.state = 'committed'
+      const holdMs = this.holdMs(tx)
       tx.release?.()
+      if (events.length) this.notify({ tx: this.lastTx, ops, holdMs, events })
       return
     }
     if (this.readOnly) {
@@ -408,16 +474,20 @@ export class Db {
     const holdMs = this.holdMs(tx)
     tx.release()
 
+    this.notify({ tx: txNo, ops, holdMs, events })
+    // after* - вне контекста завершённой транзакции (SPEC §5.6)
+    if (tx.after.length) this.als.exit(() => setTimeout(() => this.runAfter(tx), 0))
+    this.maybeCompact()
+  }
+
+  private notify(info: CommitInfo): void {
     for (const l of this.listeners) {
       try {
-        l({ tx: txNo, ops, holdMs })
+        l(info)
       } catch (err) {
         this.opts.onError(err, { where: 'onCommit' })
       }
     }
-    // after* - вне контекста завершённой транзакции (SPEC §5.6)
-    if (tx.after.length) this.als.exit(() => setTimeout(() => this.runAfter(tx), 0))
-    this.maybeCompact()
   }
 
   private async runAfter(tx: Tx): Promise<void> {
