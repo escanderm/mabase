@@ -14,6 +14,7 @@ import { z } from 'zod'
 import { clientErrors, type Access } from './access'
 import { parseDuration, type CollectionDef, type Db, type Doc, type Hooks, type TxApi, type User } from './db'
 import { ActionError, DefinitionError } from './errors'
+import { Mailer, type LetterKind } from './mail'
 import type { Schema } from './schema'
 
 export const USERS = 'users'
@@ -42,6 +43,10 @@ export type AuthOptions = {
   hashConcurrency?: number // одновременных хэшей argon2id; каждый берёт 64 МБ памяти
   loginLimit?: { attempts: number; windowMs: number } // на email или телефон вместе с IP
   authphone?: { url?: string; timeoutMs?: number }
+  mail?: Mailer // нет - режим разработки: письма в консоль
+  appUrl?: string // фронтенд: ссылки в письмах ведут сюда
+  mailIntervalMs?: number // одно письмо одного вида пользователю не чаще; по умолчанию минута
+  onError?: (err: unknown, where: string) => void // письмо сброса уходит в фоне
   fetch?: (url: string, init: RequestInit) => Promise<Response> // для тестов
   now?: () => number
 }
@@ -58,6 +63,18 @@ export type ClientInfo = { ip?: string }
 const bad = (message: string) => new ActionError('bad_request', message)
 const expired = () => new ActionError('unauthorized', 'Сессия закончилась, войдите снова')
 const unavailable = () => new ActionError('unavailable', 'authphone.su не отвечает, попробуйте позже или войдите паролем')
+const badLink = () => new ActionError('bad_request', 'Ссылка недействительна или устарела')
+
+// Письма со ссылкой: вид токена в _authTokens, страница фронтенда, срок.
+const LETTERS = {
+  verify: { letter: 'verifyEmail', path: '/verify-email', ttl: 24 * 3_600_000 },
+  reset: { letter: 'resetPassword', path: '/reset-password', ttl: 3_600_000 },
+  email: { letter: 'changeEmail', path: '/confirm-email', ttl: 24 * 3_600_000 },
+} as const satisfies Record<string, { letter: LetterKind; path: string; ttl: number }>
+type TokenKind = keyof typeof LETTERS
+
+// Смена пароля закрывает сессии и делает недействительными ссылки сброса.
+const PASSWORD_BOUND = { $in: ['session', 'reset'] }
 
 export function normalizeEmail(v: unknown): string {
   if (typeof v !== 'string') throw bad('email - строка')
@@ -213,6 +230,11 @@ export class Auth {
   private fetch: NonNullable<AuthOptions['fetch']>
   private now: () => number
   private dummy: Promise<string> | null = null
+  readonly mail: Mailer
+  private appUrl: string
+  private mailIntervalMs: number
+  private onError: (err: unknown, where: string) => void
+  private background = new Set<Promise<void>>()
 
   constructor(
     readonly access: Access,
@@ -236,6 +258,12 @@ export class Auth {
     this.authphoneUrl = (opts.authphone?.url ?? 'https://authphone.su').replace(/\/$/, '')
     this.authphoneTimeout = opts.authphone?.timeoutMs ?? 5000
     this.fetch = opts.fetch ?? ((url, init) => fetch(url, init))
+    this.mail = opts.mail ?? new Mailer()
+    // В режиме разработки ссылка без адреса - путь; иначе ссылка из письма никуда не ведёт.
+    if (this.mail.mode !== 'dev' && !opts.appUrl) throw new TypeError('auth.appUrl: адрес фронтенда для ссылок в письмах')
+    this.appUrl = (opts.appUrl ?? '').replace(/\/$/, '')
+    this.mailIntervalMs = opts.mailIntervalMs ?? 60_000
+    this.onError = opts.onError ?? ((err, where) => console.error(`[mabase] ошибка в ${where}`, err))
     this.db.collection(USERS, usersDef(opts.users ?? {}))
     this.db.collection(AUTH_TOKENS, { indexes: ['userId'] })
   }
@@ -380,10 +408,102 @@ export class Auth {
         const fresh = await tx.c[USERS]!.findOne({ _id: user.id })
         if (!fresh || fresh.passwordHash !== doc.passwordHash) throw new ActionError('conflict', 'Пароль уже изменён, войдите снова')
         const saved = await tx.c[USERS]!.update(user.id, { $set: { passwordHash } })
-        await tx.c[AUTH_TOKENS]!.removeMany({ userId: user.id, kind: 'session' })
+        await tx.c[AUTH_TOKENS]!.removeMany({ userId: user.id, kind: PASSWORD_BOUND })
         return this.startSession(tx, saved, 'password')
       }, { user })
     })
+  }
+
+  // ---------- письма: подтверждение email, сброс пароля, смена email ----------
+
+  // Письмо со ссылкой подтверждения на email вошедшего пользователя.
+  async requestVerification(user: User | null): Promise<void> {
+    return clientErrors(async () => {
+      if (!user) throw new ActionError('unauthorized', 'Нужен вход')
+      const doc = await this.db.c[USERS]!.findOne({ _id: user.id })
+      if (!doc) throw expired()
+      if (!doc.email) throw bad('У пользователя нет email')
+      if (doc.verified) throw bad('Email уже подтверждён')
+      await this.sendLetter('verify', doc, doc.email)
+    })
+  }
+
+  async confirmVerification(token: unknown): Promise<void> {
+    return clientErrors(async () => {
+      await this.db.transaction(async (tx) => {
+        const { user } = await this.useToken(tx, 'verify', token)
+        await tx.c[USERS]!.update(user._id, { $set: { verified: true } })
+      })
+    })
+  }
+
+  // Ответ всегда одинаковый и сразу: есть ли такой email, не узнать ни по
+  // ответу, ни по времени. Письмо уходит в фоне, ошибки - в onError.
+  async requestPasswordReset(input: { email: unknown }, info: ClientInfo = {}): Promise<void> {
+    return clientErrors(async () => {
+      this.requireProvider('password')
+      const email = normalizeEmail(input.email)
+      if (info.ip) this.attempts.hit(`reset:${info.ip}`)
+      this.inBackground('requestPasswordReset', async () => {
+        const doc = await this.db.c[USERS]!.findOne({ email })
+        if (doc) await this.sendLetter('reset', doc, email, { quiet: true })
+      })
+    })
+  }
+
+  // Новый пароль по ссылке. Закрывает все сессии; email считается
+  // подтверждённым - письмо дошло.
+  async confirmPasswordReset(input: { token: unknown; password: unknown }): Promise<void> {
+    return clientErrors(async () => {
+      const password = this.checkPassword(input.password)
+      await this.useToken(null, 'reset', input.token) // неверная ссылка - 400 без 65 мс на хэш
+      const passwordHash = await this.hash(password)
+      await this.db.transaction(async (tx) => {
+        const { user } = await this.useToken(tx, 'reset', input.token)
+        await tx.c[USERS]!.update(user._id, { $set: { passwordHash, verified: true } })
+        await tx.c[AUTH_TOKENS]!.removeMany({ userId: user._id, kind: PASSWORD_BOUND })
+      })
+    })
+  }
+
+  // Письмо на новый адрес. Есть пароль - нужен пароль: украденная сессия не
+  // должна уводить аккаунт сменой email. Вошёл по телефону без пароля -
+  // добавляет email без него.
+  async requestEmailChange(user: User | null, input: { newEmail: unknown; password?: unknown }): Promise<void> {
+    return clientErrors(async () => {
+      if (!user) throw new ActionError('unauthorized', 'Нужен вход')
+      const email = normalizeEmail(input.newEmail)
+      const doc = await this.db.c[USERS]!.findOne({ _id: user.id })
+      if (!doc) throw expired()
+      if (doc.email === email) throw bad('Это и есть текущий email')
+      if (doc.passwordHash) {
+        const key = `password:${user.id}`
+        this.attempts.hit(key)
+        const pw = input.password
+        if (typeof pw !== 'string' || pw.length > 256 || !(await this.verifyHash(pw, doc.passwordHash))) {
+          throw new ActionError('invalid_credentials', 'Неверный пароль')
+        }
+        this.attempts.ok(key)
+      }
+      if (await this.db.c[USERS]!.findOne({ email }, { fields: ['_id'] })) throw new ActionError('conflict', 'Этот email уже занят')
+      await this.sendLetter('email', doc, email)
+    })
+  }
+
+  // Email меняется, сессии закрываются: email - это логин.
+  async confirmEmailChange(token: unknown): Promise<void> {
+    return clientErrors(async () => {
+      await this.db.transaction(async (tx) => {
+        const { user, email } = await this.useToken(tx, 'email', token)
+        await tx.c[USERS]!.update(user._id, { $set: { email, verified: true } })
+        await tx.c[AUTH_TOKENS]!.removeMany({ userId: user._id, kind: { $in: ['session', 'reset', 'verify'] } })
+      })
+    })
+  }
+
+  // Дождаться писем, ушедших в фоне. Для тестов и остановки сервера.
+  async settled(): Promise<void> {
+    while (this.background.size) await Promise.allSettled([...this.background])
   }
 
   // ---------- для сервера: сид, действия ----------
@@ -406,7 +526,7 @@ export class Auth {
       const set = { ...rest, ...(email !== undefined && { email }), ...(phone !== undefined && { phone }), ...(passwordHash && { passwordHash }) }
       const found = await tx.c[USERS]!.findOne(by)
       if (!found) return tx.c[USERS]!.insert({ verified: false, roles: [], ...set })
-      if (passwordHash) await tx.c[AUTH_TOKENS]!.removeMany({ userId: found._id, kind: 'session' })
+      if (passwordHash) await tx.c[AUTH_TOKENS]!.removeMany({ userId: found._id, kind: PASSWORD_BOUND })
       return tx.c[USERS]!.update(found._id, { $set: set })
     })
     return this.access.forUser({ id: doc._id }).strip(USERS, doc)
@@ -417,7 +537,7 @@ export class Auth {
     const passwordHash = await this.hash(this.checkPassword(password))
     await this.db.transaction(async (tx) => {
       await tx.c[USERS]!.update(userId, { $set: { passwordHash } })
-      await tx.c[AUTH_TOKENS]!.removeMany({ userId, kind: 'session' })
+      await tx.c[AUTH_TOKENS]!.removeMany({ userId, kind: PASSWORD_BOUND })
     })
   }
 
@@ -426,6 +546,57 @@ export class Auth {
   }
 
   // ---------- внутреннее ----------
+
+  // Ссылка из письма: токен в _authTokens (только sha256), прошлые ссылки
+  // этого вида перестают работать. Письмо - после коммита, вне очереди
+  // записи. Не ушло - токен удаляется, клиент получает 503 и просит ещё раз.
+  // quiet: про "слишком часто" не сообщать (сброс пароля ничего не сообщает).
+  private async sendLetter(kind: TokenKind, user: Doc, email: string, opts: { quiet?: boolean } = {}): Promise<void> {
+    const now = this.now()
+    const secret = randomBytes(32).toString('base64url')
+    const id = await this.db.transaction(async (tx) => {
+      const prev = await tx.c[AUTH_TOKENS]!.find({ userId: user._id, kind }, { fields: ['createdAt'] })
+      if (prev.some((t) => now - t.createdAt < this.mailIntervalMs)) return null
+      for (const t of prev) await tx.c[AUTH_TOKENS]!.remove(t._id)
+      const t = await tx.c[AUTH_TOKENS]!.insert({ kind, userId: user._id, email, hash: sha256(secret), createdAt: now, expiresAt: now + LETTERS[kind].ttl })
+      return t._id
+    })
+    if (!id) {
+      if (opts.quiet) return
+      throw new ActionError('too_many_requests', 'Письмо уже отправлено, следующее - через минуту')
+    }
+    const token = `${id}.${secret}`
+    const link = `${this.appUrl}${LETTERS[kind].path}?token=${encodeURIComponent(token)}`
+    try {
+      await this.mail.send(this.mail.letter(LETTERS[kind].letter, { link, token, email, user: this.access.forUser({ id: user._id }).strip(USERS, user) }))
+    } catch (err) {
+      await this.db.c[AUTH_TOKENS]!.remove(id).catch(() => {})
+      if (opts.quiet) throw err
+      this.onError(err, `письмо ${kind}`)
+      throw new ActionError('unavailable', 'Не удалось отправить письмо, попробуйте позже')
+    }
+  }
+
+  // Проверить ссылку из письма. В транзакции - ещё и погасить: ссылка одноразовая.
+  // Ссылка на адрес, который у пользователя уже не тот (кроме смены email), не работает.
+  private async useToken(tx: TxApi | null, kind: TokenKind, token: unknown): Promise<{ user: Doc; email: string }> {
+    const t = parseRefresh(token)
+    if (!t) throw badLink()
+    const c = tx ? tx.c : this.db.c
+    const doc = await c[AUTH_TOKENS]!.findOne({ _id: t.sid })
+    if (!doc || doc.kind !== kind || doc.expiresAt <= this.now() || !safeEqual(sha256(t.secret), doc.hash)) throw badLink()
+    const user = await c[USERS]!.findOne({ _id: doc.userId })
+    if (!user || (kind !== 'email' && user.email !== doc.email)) throw badLink()
+    if (tx) await tx.c[AUTH_TOKENS]!.remove(doc._id)
+    return { user, email: doc.email }
+  }
+
+  private inBackground(where: string, f: () => Promise<void>): void {
+    const p = f()
+      .catch((err) => this.onError(err, where))
+      .finally(() => this.background.delete(p))
+    this.background.add(p)
+  }
 
   private requireProvider(p: AuthProvider): void {
     if (!this.providers.has(p)) throw new ActionError('forbidden', `Вход через ${p} выключен`)

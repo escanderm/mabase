@@ -5,12 +5,15 @@
     "": {
       "name": "@mabase/core",
       "dependencies": {
+        "nodemailer": "10.1.0",
         "sift": "^17.1.4",
         "zod": "^4.6.7",
       },
     },
   },
   "packages": {
+    "nodemailer": ["nodemailer@10.1.0", "", {}, "sha512-fXW8AulB25aOTuwfRYV6lqHyfz2VM4rr4SGXH03mE7x5znEUpzL5mu6anARUpZN7744Ziwkmr4AxSLPJsBQspg=="],
+
     "sift": ["sift@17.1.4", "", {}, "sha512-/OIVvj9Ts1mFwTYzW09YODMPeIOnDoigMOvKSIN44OmaCyhuCH/05UPF45XW7Ax0snmzDzCzdlSYqvqsn8+sIg=="],
 
     "zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
