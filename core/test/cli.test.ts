@@ -188,3 +188,27 @@ describe('чат из папки chat/', () => {
     }
   }, 60_000)
 })
+
+describe('mabase tail', () => {
+  test('126. tail не рвётся, когда долго ничего не происходит (Bun.serve закрывает молчащее соединение через 10 с)', async () => {
+    const root = project()
+    const s = await serve(root)
+    const t = Bun.spawn(['bun', CLI, 'tail', '--root', root], { stdout: 'pipe', stderr: 'pipe' })
+    let out = ''
+    for (const stream of [t.stdout, t.stderr]) void (async () => {
+      for await (const chunk of stream as unknown as AsyncIterable<Uint8Array>) out += new TextDecoder().decode(chunk)
+    })()
+    try {
+      await waitFor(() => out.includes('подключено'), 15_000)
+      await sleep(12_000) // тишина дольше idleTimeout
+      expect(out).not.toContain('ошибка')
+      expect(t.exitCode).toBeNull()
+      expect((await post(`${s.url}/api/auth/register`, { email: 'tail@example.test', password: 'tail-pass-1', data: { name: 'Т' } })).status).toBe(200)
+      await waitFor(() => out.includes('commit'), 3000)
+    } finally {
+      t.kill()
+      s.p.kill('SIGTERM')
+      await s.p.exited
+    }
+  }, 40_000)
+})

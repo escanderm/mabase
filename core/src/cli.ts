@@ -20,7 +20,7 @@ import { formatTail } from './tail'
 import { DEFAULT_API, update } from './update'
 import { openApp, readAdminInfo, startServer, type CollectionConfig, type ServerConfig } from './server'
 
-export const VERSION = '0.1.0'
+export const VERSION = '0.1.1'
 
 let pluginReady = false
 function registerModule(): void {

@@ -62,7 +62,9 @@ $('login-form').addEventListener('submit', async (e) => {
   }
 })
 
+let leaving = false // свой выход: перезагрузить после запроса к серверу, а не до
 $('logout').addEventListener('click', async () => {
+  leaving = true
   await mb.auth.logout()
   location.reload()
 })
@@ -79,6 +81,10 @@ function start() {
   $('login').hidden = true
   $('app').hidden = false
   $('me').textContent = me.name ?? me.email
+
+  // Вход потерян (сессию отозвали, сервер подняли на другой базе) - SDK уже
+  // стёр токены; назад к форме входа, а не молча слать запросы без токена.
+  mb.auth.onChange((user) => user || leaving || location.reload())
 
   mb.on('connection', (state) => {
     const ru = { online: 'в сети', connecting: 'подключение', reconnecting: 'переподключение', offline: 'нет связи' }

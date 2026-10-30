@@ -306,19 +306,27 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
     if (!isLoopback(meta.ip) || !token || !safeEqualStr(token, opts.adminToken!)) throw new HttpError(404, 'not_found', 'Нет такого адреса')
     const [cmd, arg] = parts
     // Поток NDJSON: строка на запись журнала, пока CLI не отключится.
+    // Пустая строка раз в 5 с: иначе Bun.serve рвёт молчащее соединение
+    // через 10 с (idleTimeout). CLI пустые строки пропускает.
     if (cmd === 'tail' && !arg && req.method === 'GET' && opts.tail) {
       let off = () => {}
       const enc = new TextEncoder()
       const stream = new ReadableStream<Uint8Array>({
         start(ctrl) {
-          ctrl.enqueue(enc.encode(JSON.stringify({ ts: Date.now(), kind: 'tail', status: 'подключено' }) + '\n'))
-          off = opts.tail!.listen((e) => {
+          const send = (line: string) => {
             try {
-              ctrl.enqueue(enc.encode(JSON.stringify(e) + '\n'))
+              ctrl.enqueue(enc.encode(line + '\n'))
             } catch {
               off()
             }
-          })
+          }
+          send(JSON.stringify({ ts: Date.now(), kind: 'tail', status: 'подключено' }))
+          const unlisten = opts.tail!.listen((e) => send(JSON.stringify(e)))
+          const beat = setInterval(() => send(''), 5000)
+          off = () => {
+            clearInterval(beat)
+            unlisten()
+          }
         },
         cancel() {
           off()
