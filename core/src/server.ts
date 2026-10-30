@@ -14,6 +14,7 @@ import { createHandler, type HttpOptions } from './http'
 import { Bus, type Handler } from './bus'
 import { Mailer, type MailMessage, type MailOptions } from './mail'
 import { checkEvents, PRESENCE, Realtime, type Conn, type EventConfig } from './realtime'
+import { Scheduler, type SchedulerOptions } from './scheduler'
 import { Tail } from './tail'
 
 export type CollectionConfig = CollectionDef & AccessDef
@@ -33,6 +34,7 @@ export type ServerConfig = {
   realtime?: boolean // WebSocket /api/realtime
   events?: Record<string, EventConfig>
   handlers?: () => ReadonlyMap<string, readonly Handler[]> // on() из mb_hooks
+  scheduler?: Omit<SchedulerOptions, 'onError' | 'tail'> // отложенные события
   env?: Record<string, string | undefined>
   onWarning?: (message: string) => void
   onError?: (err: unknown, where: string) => void
@@ -158,7 +160,7 @@ export function readAdminInfo(dataDir: string): AdminInfo | null {
   }
 }
 
-export type RunningServer = App & { url: string; adminToken: string; realtime: Realtime | null; stop: () => Promise<void> }
+export type RunningServer = App & { url: string; adminToken: string; realtime: Realtime | null; scheduler: Scheduler; stop: () => Promise<void> }
 
 export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
   const warn = cfg.onWarning ?? ((m: string) => console.warn(`[mabase] ${m}`))
@@ -173,6 +175,17 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
       await rt.start()
     }
     const realtime = rt
+    // Отложенные события выполняет только сервер: сид и импорт их не трогают.
+    const scheduler = new Scheduler(app.db, cfg.handlers ?? (() => new Map()), {
+      ...cfg.scheduler,
+      tail: app.tail,
+      onError: (err, where) => {
+        app.tail.publish('error', { where, error: String(err) })
+        ;(cfg.onError ?? ((e: unknown, w: string) => console.error(`[mabase] ошибка в ${w}`, e)))(err, where)
+      },
+    })
+    const overdue = await scheduler.start()
+    if (overdue) warn(`Отложенных событий, пропущенных за время простоя: ${overdue}. Выполняются сейчас`)
     type WsData = { conn?: Conn }
     const server = Bun.serve<WsData, {}>({
       port: cfg.port ?? 8090,
@@ -214,8 +227,10 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
       url,
       adminToken,
       realtime,
+      scheduler,
       stop: () =>
         (stopped ??= (async () => {
+          await scheduler.stop()
           await realtime?.stop()
           // Bun 1.3.12: stop(true) не завершается, если через сервер прошёл
           // WebSocket. Сокеты realtime уже закрыл сам - ждём не дольше секунды.

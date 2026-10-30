@@ -11,6 +11,7 @@ import type { MailMessage, Mailer, MailOptions } from './mail'
 import type { ClientLimits } from './access'
 import type { Handler } from './bus'
 import type { EventConfig } from './realtime'
+import type { SchedulerOptions } from './scheduler'
 
 export { z, ActionError, defineAction }
 export type { ActionDef, MailMessage }
@@ -35,9 +36,10 @@ export type AppConfig = {
   db?: Pick<DbOptions, 'txTimeoutMs' | 'compactMinBytes' | 'bigTxOps' | 'maxDepth'>
   realtime?: boolean // WebSocket /api/realtime
   events?: Record<string, EventConfig> // что уходит в сокет (design.md §12)
+  scheduler?: Omit<SchedulerOptions, 'onError' | 'tail'> // отложенные события: попытки, паузы
 }
 
-const CONFIG_KEYS = new Set(['collections', 'actions', 'auth', 'mail', 'http', 'limits', 'db', 'realtime', 'events'])
+const CONFIG_KEYS = new Set(['collections', 'actions', 'auth', 'mail', 'http', 'limits', 'db', 'realtime', 'events', 'scheduler'])
 
 export function defineConfig(cfg: AppConfig): AppConfig {
   for (const k of Object.keys(cfg)) if (!CONFIG_KEYS.has(k)) throw new TypeError(`defineConfig: неизвестный раздел "${k}"`)
@@ -59,7 +61,8 @@ export function defineSeed(seed: SeedDefinition['seed']): SeedDefinition {
 
 // ---------- обработчики событий из mb_hooks ----------
 // После коммита, вне транзакции: события из emit() и '<коллекция>.created |
-// updated | deleted' с { doc, prev }. Отложенные (emit с after) - шаг 10.
+// updated | deleted' с { doc, prev }. Отложенные (emit с after) - когда придёт
+// время, с task: { attempt, runAt }; минимум один раз - обработчик идемпотентный.
 
 export type EventHandler = Handler
 const handlers = new Map<string, EventHandler[]>()

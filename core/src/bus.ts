@@ -3,11 +3,13 @@
 //   - события из emit() в транзакции - по имени;
 //   - события записей - '<коллекция>.created | updated | deleted' с { doc, prev }.
 // Ошибка обработчика не отменяет сохранённое: она идёт в onError и tail.
-// Отложенные события (emit с after) - шаг 10.
+// Отложенные события (emit с after) - scheduler.ts.
 import type { Change, CommitInfo, Db } from './db'
 import type { Tail } from './tail'
 
-export type HandlerCtx = { event: string; data: any; tx: number; db: Db['c']; signal: AbortSignal }
+// task - для отложенного события: номер попытки и когда должно было выполниться.
+export type TaskInfo = { id: string; attempt: number; runAt: number }
+export type HandlerCtx = { event: string; data: any; tx: number; db: Db['c']; signal: AbortSignal; task?: TaskInfo }
 export type Handler = (ctx: HandlerCtx) => unknown
 
 export function recordEvent(ch: Change): { event: string; data: unknown } {

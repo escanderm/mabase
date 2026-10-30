@@ -1,13 +1,15 @@
 // Письмо о приглашении. Задачу ставит действие invite внутри своей транзакции,
 // поэтому приглашение и задача сохраняются вместе или не сохраняются вовсе.
 //
-// Доставка - минимум один раз (design.md §13): обработчик может сработать
-// повторно после падения. Поэтому:
-// - проверяем, что приглашение ещё актуально;
-// - передаём почтовому сервису ключ идемпотентности, чтобы он не отправил дубль.
-import { on } from 'mabase'
+// Доставка - минимум один раз (design.md §13): если процесс упадёт между
+// отправкой и удалением задачи, после старта письмо уйдёт ещё раз. Поэтому
+// сначала проверяем, что приглашение ещё актуально. Ошибка отправки - повтор
+// с паузой; после 5 попыток задача видна в mabase tail как проваленная.
+//
+// Почта не настроена - письмо печатается в консоль сервера (режим разработки).
+import { mail, on } from 'mabase'
 
-on('invite.email', async ({ data, db, signal }) => {
+on('invite.email', async ({ data, db }) => {
   const inv = await db.invites.findOne({ _id: data.inviteId })
   if (!inv) return // приглашение уже приняли или отозвали - письмо не нужно
 
@@ -16,18 +18,12 @@ on('invite.email', async ({ data, db, signal }) => {
     db.users.findOne({ _id: inv.from }),
     db.rooms.findOne({ _id: inv.roomId }),
   ])
-  if (!to || !from || !room) return
+  if (!to?.email || !from || !room) return // вошёл по телефону - email нет
 
-  // fetch здесь можно: on() работает вне транзакции и не держит очередь записи
-  const res = await fetch(process.env.MAILER_URL!, {
-    method: 'POST',
-    signal,
-    headers: { 'content-type': 'application/json', 'idempotency-key': `invite:${inv._id}` },
-    body: JSON.stringify({
-      to: to.email,
-      subject: `${from.name} приглашает вас в "${room.name}"`,
-    }),
+  // Внешний вызов здесь можно: on() работает вне транзакции и не держит очередь записи
+  await mail.send({
+    to: to.email,
+    subject: `${from.name} приглашает вас в "${room.name}"`,
+    text: `${from.name} приглашает вас в комнату "${room.name}". Войдите в чат - приглашение ждёт в списке слева.\n`,
   })
-  // ошибка -> повтор с паузой (design.md §13)
-  if (!res.ok) throw new Error(`Почта ответила ${res.status}`)
 })
