@@ -9,7 +9,7 @@
 //   system - служебная (_presence, _scheduled ...).
 // Клиентам коллекция без правил закрыта, откуда бы она ни взялась. Правила -
 // в mabase.config.ts.
-import type { Db } from './db'
+import { checkRelations, type Db, type Relation } from './db'
 import { ActionError } from './errors'
 
 export const COLLECTIONS = '_collections'
@@ -32,7 +32,7 @@ export class Registry {
         continue
       }
       try {
-        this.db.collection(d._id, { indexes: d.indexes ?? [] })
+        this.db.collection(d._id, { indexes: d.indexes ?? [], relations: d.relations ?? {} })
         this.admin.add(d._id)
       } catch (err) {
         warn(`Коллекция ${d._id} из админки не поднялась: ${(err as Error).message}`)
@@ -59,8 +59,42 @@ export class Registry {
   async setIndexes(name: string, indexes: unknown): Promise<void> {
     this.requireAdmin(name, 'индексы')
     const fields = checkIndexes(indexes)
-    this.db.collection(name, { indexes: fields })
+    this.db.collection(name, { indexes: fields, relations: this.db.relations(name) })
     await this.db.c[COLLECTIONS]!.update(name, { $set: { indexes: fields } })
+  }
+
+  // Связи коллекции из админки. Документы, которые уже лежат, должны
+  // ссылаться на существующие - иначе связь не добавится.
+  async setRelations(name: string, input: unknown): Promise<void> {
+    this.requireAdmin(name, 'связи')
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ActionError('bad_request', 'связи: { поле: { to, many?, onDelete? } }')
+    let relations: Record<string, Required<Relation>>
+    try {
+      relations = checkRelations(name, input as Record<string, Relation>)
+    } catch (err) {
+      throw new ActionError('bad_request', (err as Error).message)
+    }
+    const known = new Set(this.db.inspect().map((x) => x.name))
+    for (const [field, rel] of Object.entries(relations)) {
+      if (!known.has(rel.to) && rel.to !== name) throw new ActionError('bad_request', `${field}: коллекции ${rel.to} нет`)
+      const bad = await this.dangling(name, field, rel)
+      if (bad) throw new ActionError('conflict', `${field}: в ${bad} документах ссылки на несуществующие документы ${rel.to} - сначала исправьте их`)
+    }
+    const doc = await this.db.c[COLLECTIONS]!.findOne({ _id: name })
+    this.db.collection(name, { indexes: doc?.indexes ?? [], relations })
+    await this.db.c[COLLECTIONS]!.update(name, { $set: { relations } })
+  }
+
+  private async dangling(c: string, field: string, rel: Required<Relation>): Promise<number> {
+    const target = new Set((await this.db.c[rel.to]!.find({}, { fields: ['_id'] })).map((d) => d._id))
+    let n = 0
+    for (const d of await this.db.c[c]!.find({ [field]: { $exists: true } }, { fields: [field] })) {
+      const v = d[field]
+      if (v === null) continue
+      const ids = rel.many ? v : [v]
+      if (!Array.isArray(ids) || ids.some((x) => typeof x !== 'string' || !target.has(x))) n++
+    }
+    return n
   }
 
   // Все документы - одной транзакцией, потом описание.

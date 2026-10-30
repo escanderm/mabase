@@ -113,3 +113,12 @@ export class ActionError extends Error {
     return ACTION_ERROR_STATUS[this.code]
   }
 }
+
+// Связь между коллекциями нарушена: ссылка на несуществующий документ (400)
+// или удаление документа, на который ссылаются (409, onDelete: 'restrict').
+export class RelationError extends ActionError {
+  constructor(code: 'bad_request' | 'conflict', message: string) {
+    super(code, message)
+    this.name = 'RelationError'
+  }
+}

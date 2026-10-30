@@ -13,6 +13,7 @@ import { extname, join, resolve, sep } from 'node:path'
 import { clientErrors, type Access } from './access'
 import { toClientError, type Actions } from './actions'
 import { USERS, type Auth } from './auth'
+import { parseExpand } from './expand'
 import { importNdjson } from './import'
 import { sdkBundle } from './sdk'
 import type { User } from './db'
@@ -41,7 +42,7 @@ export type HttpOptions = {
 
 export type RequestMeta = { ip?: string }
 
-const RESERVED_PARAMS = new Set(['filter', 'sort', 'limit', 'fields', 'count'])
+const RESERVED_PARAMS = new Set(['filter', 'sort', 'limit', 'fields', 'count', 'expand'])
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...headers } })
@@ -201,13 +202,16 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
           if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw bad('limit: целое число больше 0')
           const fields = q.get('fields')?.split(',').filter(Boolean)
           for (const k of q.keys()) if (!RESERVED_PARAMS.has(k)) throw bad(`неизвестный параметр ${k}`)
-          return json(await coll.list(filter, { sort, limit, fields }))
+          return json(await coll.list(filter, { sort, limit, fields, expand: parseExpand(q.get('expand')) }))
         }
         if (method === 'POST') return json(await coll.insert(await body()))
       }
       if (parts.length === 3) {
         const id = parts[2]!
-        if (method === 'GET') return json(await coll.get(id, { fields: url.searchParams.get('fields')?.split(',').filter(Boolean) }))
+        if (method === 'GET') {
+          const q = url.searchParams
+          return json(await coll.get(id, { fields: q.get('fields')?.split(',').filter(Boolean), expand: parseExpand(q.get('expand')) }))
+        }
         if (method === 'PATCH') return json(await coll.update(id, await body()))
         if (method === 'DELETE') {
           await coll.remove(id)

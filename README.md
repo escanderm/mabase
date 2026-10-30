@@ -227,6 +227,43 @@ my-app/
   `find({ _id: { $lt: последний } }, { sort: { _id: -1 }, limit: 50 })`.
 - Вложенные массивы раскрываются: `{ a: 1 }` находит `a: [[1, 2]]`.
 
+### Связи
+
+Связь - поле, в котором лежит `_id` документа другой коллекции (или массив
+`_id`). Объявленная связь даёт три вещи:
+
+1. **Проверка при записи:** документа с таким `_id` нет - запись
+   отклоняется (400). `null` и отсутствие поля - можно.
+2. **Что делать, когда связанный документ удаляют** (`onDelete`):
+
+   | Значение | Что происходит |
+   |---|---|
+   | `restrict` (по умолчанию) | удалить нельзя, пока на документ ссылаются (409) |
+   | `cascade` | ссылающиеся документы удаляются вместе с ним |
+   | `unset` | у ссылающихся поле убирается |
+   | `pull` | для массива: `_id` убирается из массива |
+
+   Всё это - в той же транзакции, что и удаление.
+3. **`expand`** - связанные документы прямо в ответе:
+
+   ```js
+   await mb.c.messages.find({ roomId }, { expand: ['authorId'] })
+   // [{ _id, text, authorId: 'u1', _expand: { authorId: { _id: 'u1', name: 'Алиса' } } }]
+   ```
+
+   Клиент получает связанный документ, только если правило `view` той
+   коллекции его пускает. Закрытые поля той коллекции скрыты, как при
+   обычном чтении. Не виден - в `_expand` будет `null`. Работает в `find`,
+   `get` и `GET /api/c/...?expand=a,b`; в `live()` - пока нет.
+
+Объявить связь:
+- **в коде** - `relations` в `defineCollection`, пример ниже;
+- **в админке** - вкладка "Связи" у коллекции, созданной в админке.
+
+Админка показывает поля-связи ссылками с именем связанного документа, а у
+каждого документа есть кнопка "Ссылки" - кто на него ссылается. Поля-связи
+индексируются автоматически.
+
 ### Индексы
 
 Индекс по полю ускоряет равенство, `$in`, диапазоны и сортировку по этому
@@ -262,6 +299,10 @@ const orders = defineCollection('orders', {
     create: (user) => !!user,
     update: (user, { before }) => user?.id === before.userId,
     delete: false,
+  },
+  relations: {
+    userId: { to: 'users', onDelete: 'cascade' },    // удалили пользователя - удалились его заказы
+    items: { to: 'products', many: true, onDelete: 'pull' },
   },
   hooks: {
     beforeCreate: ({ doc, user }) => ({ ...doc, userId: user!.id, status: 'new' }),
@@ -422,7 +463,7 @@ await mb.auth.login({ email, password })
 await mb.auth.restore()                       // после перезагрузки страницы
 mb.auth.onChange((user) => { /* вошёл или вышел */ })
 
-await mb.c.orders.find({ status: 'new' }, { sort: { _id: -1 }, limit: 20 })
+await mb.c.orders.find({ status: 'new' }, { sort: { _id: -1 }, limit: 20, expand: ['userId'] })
 await mb.c.orders.insert({ total: 100 })
 await mb.c.orders.update(id, { $set: { note: 'позвонить' } })
 await mb.c.orders.remove(id)
@@ -445,7 +486,7 @@ mb.on('typing', ({ from, data }) => {})
 | Путь | Что |
 |---|---|
 | `GET /api/health` | `{ ok: true }` |
-| `GET /api/c/:коллекция` | `?filter=<JSON>&sort=<JSON>&limit=50&fields=a,b` -> `{ items, tx }`; `?count=1` -> `{ count }` |
+| `GET /api/c/:коллекция` | `?filter=<JSON>&sort=<JSON>&limit=50&fields=a,b&expand=a,b` -> `{ items, tx }`; `?count=1` -> `{ count }` |
 | `POST /api/c/:коллекция` | создать документ |
 | `GET`, `PATCH`, `DELETE /api/c/:коллекция/:id` | прочитать, изменить операторами (`{ $set: ... }`), удалить |
 | `POST /api/actions/:имя` | вызвать действие, тело - `input` |

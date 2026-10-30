@@ -23,6 +23,7 @@ import { z } from 'zod'
 import { clientErrors, type Access } from './access'
 import type { Doc, Query } from './db'
 import { ActionError } from './errors'
+import { expandDocs, parseExpand } from './expand'
 import { validateQuery } from './query'
 import { SUPERUSER_SESSIONS, SUPERUSERS, type Superuser, type Superusers } from './superusers'
 import type { Mailer } from './mail'
@@ -157,10 +158,16 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
           return json({ name, source: o.registry.source(name) })
         }
         if (a && !b && m === 'PUT') {
-          const { indexes } = await r.body()
-          await o.registry.setIndexes(a, indexes)
-          by(me, 'collection.indexes', { c: a, indexes })
-          return json({ name: a, indexes })
+          const { indexes, relations } = await r.body()
+          if (relations !== undefined) {
+            await o.registry.setRelations(a, relations)
+            by(me, 'collection.relations', { c: a, relations })
+          }
+          if (indexes !== undefined) {
+            await o.registry.setIndexes(a, indexes)
+            by(me, 'collection.indexes', { c: a, indexes })
+          }
+          return json({ name: a, indexes: db.inspect().find((x) => x.name === a)?.indexes, relations: db.relations(a) })
         }
         if (a && !b && m === 'DELETE') {
           const deleted = await o.registry.drop(a)
@@ -198,6 +205,8 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
           const t0 = performance.now()
           const found = await coll.find(filter as Query, { sort, limit: skip + limit })
           const items = found.slice(skip).map((d) => project(strip(a, d), fields))
+          const expand = parseExpand(q.get('expand'))
+          if (expand) await expandDocs(items, expand, db.relations(a), async (to, ids) => (await db.c[to]!.find({ _id: { $in: ids } })).map((d) => strip(to, d)))
           const ms = performance.now() - t0
           const [total, explain] = await Promise.all([coll.count(filter as Query), coll.explain(filter as Query, { sort, limit: skip + limit })])
           return json({ items, total, explain, ms: Math.round(ms * 100) / 100 })
@@ -221,6 +230,15 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
           const deleted = await coll.removeMany(filter)
           by(me, 'delete-many', { c: a, filter, deleted })
           return json({ deleted })
+        }
+        // Кто ссылается на документ: [{ c, field, count }]
+        if (b && c3 === 'backlinks' && m === 'GET') {
+          const out = []
+          for (const inc of db.incoming(a)) {
+            const count = await db.c[inc.c]!.count({ [inc.field]: b })
+            if (count) out.push({ c: inc.c, field: inc.field, count, onDelete: inc.rel.onDelete })
+          }
+          return json(out)
         }
         if (b && !c3) {
           if (m === 'GET') {
@@ -280,6 +298,8 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
       system: c.startsWith('_'),
       source: o.registry.source(c),
       indexes: info?.indexes ?? [],
+      relations: db.relations(c),
+      incoming: db.incoming(c).map(({ c: from, field, rel }) => ({ c: from, field, ...rel })),
       schema: jsonSchema,
       rules: { list: src(rules.list), view: src(rules.view), create: src(rules.create), update: src(rules.update), delete: src(rules.delete) },
       dependsOn: rules.dependsOn ?? [],

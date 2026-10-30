@@ -10,6 +10,7 @@ import {
   NotFoundError,
   QueryError,
   ReadOnlyError,
+  RelationError,
   TxAbortedError,
   TxTimeoutError,
 } from './errors'
@@ -35,7 +36,28 @@ export type Hooks = {
   afterUpdate?: (ctx: { db: Db; prev: Doc; doc: Doc; user: User | null }) => unknown
   afterDelete?: (ctx: { db: Db; prev: Doc; user: User | null }) => unknown
 }
-export type CollectionDef = { schema?: Schema; indexes?: string[]; hooks?: Hooks }
+// Связь: поле хранит _id документа другой коллекции (many - массив _id).
+// При записи проверяется, что такие документы есть. При удалении документа,
+// на который ссылаются:
+//   restrict - нельзя (по умолчанию), cascade - удалить ссылающиеся,
+//   unset - убрать поле, pull - убрать _id из массива (для many).
+export type Relation = { to: string; many?: boolean; onDelete?: 'restrict' | 'cascade' | 'unset' | 'pull' }
+export type CollectionDef = { schema?: Schema; indexes?: string[]; hooks?: Hooks; relations?: Record<string, Relation> }
+
+export function checkRelations(c: string, relations: Record<string, Relation> = {}): Record<string, Required<Relation>> {
+  const out: Record<string, Required<Relation>> = {}
+  for (const [field, r] of Object.entries(relations)) {
+    if (!/^[A-Za-z][\w-]*$/.test(field)) throw new DefinitionError(`${c}.relations: поле "${field}" - только верхнего уровня, латиница`)
+    if (!r || typeof r.to !== 'string' || !r.to) throw new DefinitionError(`${c}.relations.${field}: нужно to - имя коллекции`)
+    const many = !!r.many
+    const onDelete = r.onDelete ?? 'restrict'
+    if (!['restrict', 'cascade', 'unset', 'pull'].includes(onDelete)) throw new DefinitionError(`${c}.relations.${field}.onDelete: restrict, cascade, unset или pull`)
+    if (onDelete === 'pull' && !many) throw new DefinitionError(`${c}.relations.${field}: pull - только для many; для одной ссылки - unset`)
+    if (onDelete === 'unset' && many) throw new DefinitionError(`${c}.relations.${field}: для many - pull (убрать id из массива)`)
+    out[field] = { to: r.to, many, onDelete }
+  }
+  return out
+}
 
 // Событие из транзакции. Уходит подписчикам onCommit только после коммита.
 export type TxEvent = { event: string; data: unknown }
@@ -283,9 +305,11 @@ export class Db {
   collection(name: string, def: CollectionDef = {}): this {
     if (!name || name.includes('/')) throw new QueryError(`недопустимое имя коллекции "${name}"`)
     if (name === SCHEDULED && this.defs.has(SCHEDULED)) throw new DefinitionError(`${SCHEDULED} - системная коллекция`)
-    const fields = [...new Set(def.indexes ?? [])]
+    const relations = checkRelations(name, def.relations)
+    // Поля-связи индексируются сами: по ним ищут ссылки при удалении
+    const fields = [...new Set([...(def.indexes ?? []), ...Object.keys(relations)])]
     checkIndexes(name, def.schema, fields)
-    this.defs.set(name, def)
+    this.defs.set(name, { ...def, relations })
     const state = this.state(name)
     state.indexes = new Map(fields.map((f) => [f, this.buildIndex(state, f)]))
     return this
@@ -315,6 +339,17 @@ export class Db {
       snapshotSize: this.disk.snapshotSize,
       dir: this.disk.dir,
     }
+  }
+
+  relations(c: string): Record<string, Required<Relation>> {
+    return (this.defs.get(c)?.relations ?? {}) as Record<string, Required<Relation>>
+  }
+
+  // Кто ссылается на коллекцию: [{ c, field, rel }].
+  incoming(target: string): { c: string; field: string; rel: Required<Relation> }[] {
+    const out: { c: string; field: string; rel: Required<Relation> }[] = []
+    for (const [c, def] of this.defs) for (const [field, rel] of Object.entries(def.relations ?? {})) if (rel.to === target) out.push({ c, field, rel: rel as Required<Relation> })
+    return out
   }
 
   isDeclared(name: string): boolean {
@@ -601,6 +636,7 @@ export class Db {
     this.ensureOpen(tx)
     doc = this.finalize(c, doc)
     this.stage(tx, c, id, doc)
+    this.checkRefs(tx, c, doc, null) // после stage: ссылка на самого себя тоже находится
     if (hooks?.afterCreate) {
       const h = hooks.afterCreate
       const saved = clone(doc)
@@ -630,6 +666,7 @@ export class Db {
     this.ensureOpen(tx)
     next = this.finalize(c, next)
     this.stage(tx, c, id, next)
+    this.checkRefs(tx, c, next, prev)
     if (hooks?.afterUpdate) {
       const h = hooks.afterUpdate
       const p = clone(prev)
@@ -639,7 +676,7 @@ export class Db {
     return clone(next)
   }
 
-  async _remove(tx: Tx, c: string, id: string): Promise<void> {
+  async _remove(tx: Tx, c: string, id: string, cascade = 0): Promise<void> {
     await this.enter(tx)
     const depth = this.depthOf(tx)
     const prev = this.get(tx, c, id)
@@ -654,10 +691,49 @@ export class Db {
     }
     this.ensureOpen(tx)
     this.stage(tx, c, id, null)
+    await this.onDeleteRefs(tx, c, id, cascade)
     if (hooks?.afterDelete) {
       const h = hooks.afterDelete
       const p = clone(prev)
       tx.after.push({ collection: c, run: () => h({ prev: p, db: this, user: tx.user }) })
+    }
+  }
+
+  // Ссылки документа существуют. Поле не менялось - не проверяем: удалить
+  // документ, на который ссылаются, и так нельзя (или ссылку уберёт onDelete).
+  private checkRefs(tx: Tx, c: string, doc: Doc, prev: Doc | null): void {
+    for (const [field, rel] of Object.entries(this.relations(c))) {
+      const v = doc[field]
+      if (v === undefined || v === null) continue
+      if (prev && JSON.stringify(prev[field]) === JSON.stringify(v)) continue
+      const ids = rel.many ? v : [v]
+      if (!Array.isArray(ids) || !ids.every((x) => typeof x === 'string')) {
+        throw new RelationError('bad_request', `${c}.${field}: ${rel.many ? 'массив _id' : '_id строкой'} документа из ${rel.to}`)
+      }
+      for (const ref of ids) if (!this.get(tx, rel.to, ref)) throw new RelationError('bad_request', `${c}.${field}: в ${rel.to} нет документа ${ref}`)
+    }
+  }
+
+  // Удалили документ - что со ссылками на него (onDelete). Сначала все
+  // restrict: удаление либо целиком, либо никак.
+  private async onDeleteRefs(tx: Tx, c: string, id: string, cascade: number): Promise<void> {
+    const found = []
+    for (const inc of this.incoming(c)) {
+      const refs = (await this._find(tx, inc.c, { [inc.field]: id }, { fields: ['_id'], unordered: true })).map((d) => d._id)
+      if (!refs.length) continue
+      if (inc.rel.onDelete === 'restrict') {
+        throw new RelationError('conflict', `Нельзя удалить ${c}/${id}: на него ссылается ${inc.c}.${inc.field} (${refs.length}). Удалите их сначала или задайте onDelete`)
+      }
+      found.push({ ...inc, refs })
+    }
+    if (found.length && cascade >= this.opts.maxDepth) throw new DepthError(cascade)
+    for (const { c: rc, field, rel, refs } of found) {
+      for (const ref of refs) {
+        if (!this.get(tx, rc, ref)) continue // уже удалили по другой связи
+        if (rel.onDelete === 'cascade') await this._remove(tx, rc, ref, cascade + 1)
+        else if (rel.onDelete === 'unset') await this._update(tx, rc, ref, { $unset: { [field]: '' } })
+        else await this._update(tx, rc, ref, { $pull: { [field]: id } })
+      }
     }
   }
 

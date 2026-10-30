@@ -101,7 +101,7 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
     if (cfg.realtime && !others[PRESENCE]) others[PRESENCE] = {}
     for (const [name, c] of Object.entries(others)) {
       const indexes = name === PRESENCE ? [...new Set([...(c.indexes ?? []), 'userId'])] : c.indexes
-      db.collection(name, { schema: c.schema, indexes, hooks: c.hooks })
+      db.collection(name, { schema: c.schema, indexes, hooks: c.hooks, relations: c.relations })
       accessDefs[name] = { rules: c.rules, fields: c.fields, owner: c.owner }
     }
     if (usersCfg) accessDefs[USERS] = { rules: usersCfg.rules, fields: usersCfg.fields }
@@ -127,7 +127,7 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
     const auth = new Auth(access, {
       ...cfg.auth,
       secret,
-      users: usersCfg && { schema: usersCfg.schema, indexes: usersCfg.indexes, hooks: usersCfg.hooks },
+      users: usersCfg && { schema: usersCfg.schema, indexes: usersCfg.indexes, hooks: usersCfg.hooks, relations: usersCfg.relations },
       mail,
       onError: (err, where) => onError(err, where),
     })

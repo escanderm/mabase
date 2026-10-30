@@ -3,6 +3,7 @@
 // ограничений не имеет. HTTP и сокет (шаги 7-8) работают только через него.
 import { project, type CollectionApi, type Db, type Doc, type FindOptions, type Query, type Update, type User } from './db'
 import { ActionError, NotFoundError, QueryError, ValidationError } from './errors'
+import { expandDocs } from './expand'
 import { applyUpdate, SYSTEM_FIELDS, validateQuery, validateUpdate } from './query'
 
 type Collections = Record<string, CollectionApi>
@@ -187,6 +188,24 @@ export class ClientSession {
     })
   }
 
+  // _expand через правило view целевой коллекции и её виды полей: по связи
+  // видно ровно то, что клиент увидел бы, читая ту коллекцию сам.
+  async expand(c: string, docs: Doc[], fields?: string[]): Promise<Doc[]> {
+    if (!fields?.length) return docs
+    for (const f of fields) this.checkField(c, f, 'expand')
+    await expandDocs(docs, fields, this.access.db.relations(c), async (to, ids) => {
+      let rule: Query
+      try {
+        rule = await this.ruleFilter(to, 'view')
+      } catch (err) {
+        if (err instanceof ActionError) return [] // нет доступа к той коллекции - ничего не подтягиваем
+        throw err
+      }
+      return (await this.access.db.c[to]!.find(and(rule, { _id: { $in: ids } }))).map((d) => this.strip(to, d))
+    })
+    return docs
+  }
+
   deny(): ActionError {
     return this.user ? new ActionError('forbidden', 'Нет доступа') : new ActionError('unauthorized', 'Нужен вход')
   }
@@ -292,6 +311,8 @@ export async function clientErrors<T>(fn: () => Promise<T>): Promise<T> {
 export const and = (a: Query, b: Query): Query =>
   Object.keys(a).length === 0 ? b : Object.keys(b).length === 0 ? a : { $and: [a, b] }
 
+export type ClientFindOptions = FindOptions & { expand?: string[] }
+
 export class ClientCollection {
   constructor(
     private s: ClientSession,
@@ -311,19 +332,19 @@ export class ClientCollection {
     return { sort: opts.sort, limit, maxScanned }
   }
 
-  find(filter: unknown = {}, opts: FindOptions = {}): Promise<Doc[]> {
+  find(filter: unknown = {}, opts: ClientFindOptions = {}): Promise<Doc[]> {
     return clientErrors(async () => {
       this.s.checkFilter(this.name, filter)
       const o = this.opts(opts)
       const rule = await this.s.ruleFilter(this.name, 'list')
       const docs = await this.core.find(and(rule, filter), o)
-      return docs.map((d) => this.s.strip(this.name, d, opts.fields))
+      return this.s.expand(this.name, docs.map((d) => this.s.strip(this.name, d, opts.fields)), opts.expand)
     })
   }
 
   // То же, что find, плюс tx, на котором прочитано: клиент применит из
   // буфера подписки только события с большим tx (design.md §12, реконнект).
-  list(filter: unknown = {}, opts: FindOptions = {}): Promise<{ items: Doc[]; tx: number }> {
+  list(filter: unknown = {}, opts: ClientFindOptions = {}): Promise<{ items: Doc[]; tx: number }> {
     return clientErrors(async () => {
       this.s.checkFilter(this.name, filter)
       const o = this.opts(opts)
@@ -331,7 +352,8 @@ export class ClientCollection {
       // core.find без транзакции читает синхронно при вызове: tx и данные - одного момента
       const tx = this.s.access.db.lastTx
       const docs = await this.core.find(and(rule, filter), o)
-      return { items: docs.map((d) => this.s.strip(this.name, d, opts.fields)), tx }
+      const items = await this.s.expand(this.name, docs.map((d) => this.s.strip(this.name, d, opts.fields)), opts.expand)
+      return { items, tx }
     })
   }
 
@@ -344,14 +366,14 @@ export class ClientCollection {
   }
 
   // Одна запись по id через правило view. Не видна - 404: не говорим, что она есть.
-  get(id: string, opts: Pick<FindOptions, 'fields'> = {}): Promise<Doc> {
+  get(id: string, opts: Pick<ClientFindOptions, 'fields' | 'expand'> = {}): Promise<Doc> {
     return clientErrors(async () => {
       if (typeof id !== 'string') throw bad('id - строка')
       for (const f of opts.fields ?? []) this.s.checkField(this.name, f, 'fields')
       const rule = await this.s.ruleFilter(this.name, 'view')
       const doc = await this.core.findOne(and(rule, { _id: id }))
       if (!doc) throw new ActionError('not_found', 'Запись не найдена')
-      return this.s.strip(this.name, doc, opts.fields)
+      return (await this.s.expand(this.name, [this.s.strip(this.name, doc, opts.fields)], opts.expand))[0]!
     })
   }
 

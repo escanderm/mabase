@@ -39,7 +39,8 @@ export type ClientOptions = {
 export type User = Doc & { id: string }
 type Session = { user: Doc; accessToken: string; accessExpiresAt: number; refreshToken: string }
 export type ConnectionState = 'offline' | 'connecting' | 'online' | 'reconnecting'
-export type FindOptions = { sort?: Record<string, 1 | -1>; limit?: number; fields?: string[] }
+// expand: связанные документы в doc._expand.<поле> (поле объявлено связью)
+export type FindOptions = { sort?: Record<string, 1 | -1>; limit?: number; fields?: string[]; expand?: string[] }
 export type LiveOptions = FindOptions & { parent?: [collection: string, id: string] }
 
 function memoryStorage(): KeyValueStorage {
@@ -127,6 +128,8 @@ export class MabaseClient {
   }
 
   live<T extends Doc = Doc>(collection: string, filter: Record<string, unknown> = {}, opts: LiveOptions = {}): Live<T> {
+    // Связанные документы меняются отдельно от списка - в живой выборке их пока нет
+    if (opts.expand?.length) throw new TypeError('live(): expand пока не поддерживается - связанные документы подтягивайте через find или отдельной live()')
     return new Live<T>(this, collection, filter, opts)
   }
 
@@ -364,6 +367,7 @@ const query = (filter: unknown, opts: FindOptions = {}) => {
   if (opts.sort) q.set('sort', JSON.stringify(opts.sort))
   if (opts.limit !== undefined) q.set('limit', String(opts.limit))
   if (opts.fields) q.set('fields', opts.fields.join(','))
+  if (opts.expand?.length) q.set('expand', opts.expand.join(','))
   const s = q.toString()
   return s ? `?${s}` : ''
 }
@@ -390,7 +394,7 @@ export class CollectionClient<T extends Doc = Doc> {
     return (await this.mb.request('GET', `${this.base}${q ? q + '&' : '?'}count=1`)).count
   }
 
-  get(id: string, opts: { fields?: string[] } = {}): Promise<T> {
+  get(id: string, opts: { fields?: string[]; expand?: string[] } = {}): Promise<T> {
     return this.mb.request('GET', `${this.base}/${encodeURIComponent(id)}${query({}, opts)}`)
   }
 

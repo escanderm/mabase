@@ -432,6 +432,7 @@ const TABS: [string, string][] = [
   ['documents', 'Документы'],
   ['schema', 'Схема'],
   ['indexes', 'Индексы'],
+  ['relations', 'Связи'],
   ['rules', 'Правила'],
 ]
 
@@ -455,6 +456,7 @@ async function collectionPage(main: HTMLElement, name: string, tab: string): Pro
   if (tab === 'schema') return schemaTab(page, name)
   if (tab === 'indexes') return indexesTab(page, name)
   if (tab === 'rules') return rulesTab(page, name)
+  if (tab === 'relations') return relationsTab(page, name)
   return documentsTab(page, name)
 }
 
@@ -596,6 +598,9 @@ async function documentsTab(page: HTMLElement, name: string): Promise<void> {
 
   let items: Doc[] = []
   let seq = 0
+  // Связи коллекции: поля показываются ссылками с подписью связанного документа
+  const meta = await api('GET', `c/${encodeURIComponent(name)}/meta`).catch(() => null)
+  const rels: Record<string, Rel> = meta?.relations ?? {}
 
   async function load(quiet = false): Promise<void> {
     const my = ++seq
@@ -613,9 +618,16 @@ async function documentsTab(page: HTMLElement, name: string): Promise<void> {
       if (filter) p.set('filter', JSON.stringify(filter))
       if (sort) p.set('sort', JSON.stringify(sort))
       if (fields) p.set('fields', JSON.stringify(fields))
+      if (Object.keys(rels).length) p.set('expand', Object.keys(rels).join(','))
       const r = await api('GET', `c/${encodeURIComponent(name)}?${p}`)
       if (my !== seq) return
-      items = r.items
+      expanded.clear()
+      items = r.items.map((d: any) => {
+        const { _expand, ...doc } = d
+        if (_expand) expanded.set(doc._id, _expand)
+        return doc
+      })
+      relCtx = rels
       const from = r.total ? q.skip + 1 : 0
       const to = q.skip + r.items.length
       pager.textContent = `${num(from)}-${num(to)} из ${num(r.total)}`
@@ -666,7 +678,7 @@ function docCard(c: string, d: Doc, reload: () => void): HTMLElement {
   const show = () => {
     card.className = 'doc'
     card.replaceChildren(
-      view === 'json' ? h('pre', {}, JSON.stringify(d, null, 2)) : tree(d, 0),
+      view === 'json' ? h('pre', {}, JSON.stringify(d, null, 2)) : tree(d, 0, d._id),
       h(
         'div',
         { class: 'actions' },
@@ -681,6 +693,7 @@ function docCard(c: string, d: Doc, reload: () => void): HTMLElement {
           'Копировать',
         ),
         h('button', { class: 'btn ghost small', title: 'Новый документ с теми же полями', onclick: () => insertDialog(c, d, reload) }, 'Клон'),
+        h('button', { class: 'btn ghost small', title: 'Кто ссылается на этот документ', onclick: () => backlinksDialog(c, d._id) }, 'Ссылки'),
         h('button', { class: 'btn ghost small danger', onclick: confirmDelete, title: 'Удалить документ' }, 'Удалить'),
       ),
     )
@@ -752,11 +765,44 @@ function docCard(c: string, d: Doc, reload: () => void): HTMLElement {
   return card
 }
 
-function tree(v: Record<string, any> | any[], depth: number): HTMLElement {
+type Rel = { to: string; many: boolean; onDelete: string }
+let relCtx: Record<string, Rel> = {} // связи открытой коллекции
+const expanded = new Map<string, Record<string, any>>() // _id -> _expand
+const labelOf = (d: any) => (d ? String(d.name ?? d.title ?? d.email ?? d.phone ?? d._id) : 'нет такого документа')
+
+// Открыть коллекцию с готовым фильтром.
+function openFiltered(c: string, filter: string): void {
+  queries.set(c, { filter, sort: '', fields: '', skip: 0, limit: 20 })
+  location.hash = `#/c/${encodeURIComponent(c)}`
+}
+
+function refLink(to: string, id: string, target: any): HTMLElement {
+  return h(
+    'span',
+    {},
+    h('a', { href: `#/c/${encodeURIComponent(to)}`, class: 'v-string', title: `Открыть ${to}/${id}`, onclick: (e: Event) => (e.preventDefault(), openFiltered(to, `{ _id: '${id}' }`)) }, JSON.stringify(id)),
+    h('span', { class: `hint${target ? '' : ' v-null'}` }, `-> ${labelOf(target)}`),
+  )
+}
+
+function tree(v: Record<string, any> | any[], depth: number, ownerId?: string): HTMLElement {
   const box = h('div', { class: depth ? 'nested' : '' })
   const entries = Array.isArray(v) ? v.map((x, i) => [String(i), x] as const) : Object.entries(v)
+  const ex = depth === 0 && ownerId ? expanded.get(ownerId) : undefined
   for (const [k, x] of entries) {
     const row = h('div', { class: 'kv' }, h('span', { class: 'k' }, k))
+    const rel = depth === 0 ? relCtx[k] : undefined
+    if (rel && !rel.many && typeof x === 'string') {
+      row.append(refLink(rel.to, x, ex?.[k]))
+      box.append(row)
+      continue
+    }
+    if (rel && rel.many && Array.isArray(x)) {
+      const byId = new Map(((ex?.[k] ?? []) as any[]).map((d) => [d._id, d]))
+      row.append(h('span', { class: 'kind' }, `-> ${rel.to} (${x.length})`))
+      box.append(row, h('div', { class: 'nested' }, x.map((id) => h('div', { class: 'kv' }, typeof id === 'string' ? refLink(rel.to, id, byId.get(id)) : scalar(id)))))
+      continue
+    }
     if (x && typeof x === 'object') {
       const n = Array.isArray(x) ? x.length : Object.keys(x).length
       const label = h('span', { class: 'kind' }, Array.isArray(x) ? `Array (${n})` : `Object (${n})`)
@@ -820,7 +866,18 @@ function table(c: string, docs: Doc[], reload: () => void): HTMLElement {
       h(
         'tbody',
         {},
-        docs.map((d) => h('tr', { class: 'click', title: 'Открыть для правки', onclick: () => editDialog(c, d, reload) }, shown.map((k) => cell(d[k])))),
+        docs.map((d) =>
+          h(
+            'tr',
+            { class: 'click', title: 'Открыть для правки', onclick: () => editDialog(c, d, reload) },
+            shown.map((k) => {
+              const rel = relCtx[k]
+              const ex = expanded.get(d._id)?.[k]
+              if (rel && ex !== undefined) return cell(rel.many ? (ex as any[]).map(labelOf).join(', ') : labelOf(ex))
+              return cell(d[k])
+            }),
+          ),
+        ),
       ),
     ),
     cols.length > shown.length ? h('div', { class: 'faint' }, `Ещё полей: ${cols.length - shown.length} - смотрите в списке или JSON`) : null,
@@ -1351,6 +1408,129 @@ async function adminsPage(main: HTMLElement): Promise<void> {
         ),
       ),
     ),
+  )
+}
+
+// ---------- связи ----------
+
+async function backlinksDialog(c: string, id: string): Promise<void> {
+  const list = await api('GET', `c/${encodeURIComponent(c)}/${encodeURIComponent(id)}/backlinks`).catch((e) => (fail(e), null))
+  if (!list) return
+  const ON: Record<string, string> = { restrict: 'удалить документ нельзя, пока они есть', cascade: 'удалятся вместе с ним', unset: 'ссылка уберётся', pull: 'id уберётся из массива' }
+  const d = dialog(
+    `Кто ссылается на ${c}/${id}`,
+    [
+      list.length
+        ? h(
+            'table',
+            { class: 'grid' },
+            h('tbody', {}, list.map((b: any) => h('tr', { class: 'click', onclick: () => (d.close(), openFiltered(b.c, `{ ${b.field}: '${id}' }`)) }, h('td', { class: 'cell' }, `${b.c}.${b.field}`), h('td', {}, num(b.count)), h('td', { class: 'faint' }, `при удалении: ${ON[b.onDelete] ?? b.onDelete}`)))),
+          )
+        : h('p', { class: 'muted' }, 'Никто не ссылается.'),
+    ],
+    [h('button', { class: 'btn', onclick: () => d.close() }, 'Закрыть')],
+  )
+}
+
+const ON_DELETE: [string, string][] = [
+  ['restrict', 'запретить удаление, пока есть ссылки'],
+  ['cascade', 'удалить ссылающиеся документы'],
+  ['unset', 'убрать поле у ссылающихся'],
+  ['pull', 'убрать id из массива (для нескольких)'],
+]
+
+async function relationsTab(page: HTMLElement, name: string): Promise<void> {
+  const m = await api('GET', `c/${encodeURIComponent(name)}/meta`).catch((e) => (fail(e), null))
+  if (!m) return
+  const rels: Record<string, Rel> = m.relations
+  const editable = m.source === 'admin'
+  const save = async (next: Record<string, Rel>) => {
+    try {
+      await api('PUT', `collections/${encodeURIComponent(name)}`, { relations: next })
+      toast('Связи обновлены')
+      route()
+    } catch (e) {
+      fail(e)
+    }
+  }
+  page.append(
+    h('p', { class: 'muted' }, 'Связь - поле с _id документа другой коллекции. MaBase проверяет, что такой документ есть, решает, что делать при его удалении, и подтягивает связанные документы в ответ (expand).'),
+    h('div', { class: 'section' }, 'Эта коллекция ссылается'),
+    Object.keys(rels).length
+      ? h(
+          'table',
+          { class: 'grid' },
+          h('thead', {}, h('tr', {}, h('th', {}, 'Поле'), h('th', {}, 'На коллекцию'), h('th', {}, 'Сколько'), h('th', {}, 'При удалении связанного'), editable && h('th', {}, ''))),
+          h(
+            'tbody',
+            {},
+            Object.entries(rels).map(([f, r]) =>
+              h(
+                'tr',
+                {},
+                h('td', { class: 'cell' }, f),
+                h('td', {}, h('a', { href: `#/c/${encodeURIComponent(r.to)}` }, r.to)),
+                h('td', {}, r.many ? 'несколько (массив)' : 'один'),
+                h('td', {}, Object.fromEntries(ON_DELETE)[r.onDelete] ?? r.onDelete),
+                editable &&
+                  h(
+                    'td',
+                    {},
+                    h(
+                      'button',
+                      {
+                        class: 'btn small danger',
+                        onclick: () => {
+                          const next = { ...rels }
+                          delete next[f]
+                          save(next)
+                        },
+                      },
+                      'Убрать',
+                    ),
+                  ),
+              ),
+            ),
+          ),
+        )
+      : h('p', { class: 'muted' }, 'Связей нет.'),
+  )
+  if (editable) {
+    const fieldInput = h('input', { class: 'input mono', placeholder: 'поле, например userId' }) as HTMLInputElement
+    const to = h('select', { class: 'input' }, (info?.collections ?? []).filter((c) => !c.system || c.name === 'users').map((c) => h('option', { value: c.name }, c.name))) as HTMLSelectElement
+    const [manyRow, many] = check('Несколько', false, 'поле - массив _id')
+    const onDel = h('select', { class: 'input' }, ON_DELETE.map(([v, t]) => h('option', { value: v }, t))) as HTMLSelectElement
+    many.addEventListener('change', () => (onDel.value = many.checked ? 'pull' : 'restrict'))
+    page.append(
+      h('div', { class: 'section' }, 'Добавить связь'),
+      h(
+        'div',
+        { class: 'panel' },
+        h('div', { class: 'grid2' }, field('Поле', fieldInput), field('На коллекцию', to)),
+        manyRow,
+        field('Когда связанный документ удаляют', onDel),
+        h(
+          'button',
+          {
+            class: 'btn primary',
+            onclick: () => {
+              const f = fieldInput.value.trim()
+              if (!f) return toast('Укажите поле', true)
+              save({ ...rels, [f]: { to: to.value, many: many.checked, onDelete: onDel.value } })
+            },
+          },
+          'Добавить связь',
+        ),
+      ),
+    )
+  } else if (m.source === 'code') {
+    page.append(h('p', { class: 'muted' }, 'Коллекция объявлена в коде - связи задаются там:'), h('pre', { class: 'code-block' }, `defineCollection('${name}', {\n  relations: {\n    userId: { to: 'users', onDelete: 'restrict' },\n    tags: { to: 'tags', many: true, onDelete: 'pull' },\n  },\n})`))
+  } else page.append(h('p', { class: 'muted' }, 'Связи можно задать у коллекций из кода и из админки. Здесь их нет - создайте коллекцию с этим именем ("+ создать" слева).'))
+  page.append(
+    h('div', { class: 'section' }, 'На эту коллекцию ссылаются'),
+    m.incoming.length
+      ? h('table', { class: 'grid' }, h('tbody', {}, m.incoming.map((i: any) => h('tr', {}, h('td', { class: 'cell' }, `${i.c}.${i.field}`), h('td', {}, Object.fromEntries(ON_DELETE)[i.onDelete] ?? i.onDelete)))))
+      : h('p', { class: 'muted' }, 'Никто.'),
   )
 }
 

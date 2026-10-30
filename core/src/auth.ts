@@ -197,7 +197,7 @@ function usersDef(def: CollectionDef): CollectionDef {
   } else {
     schema = z.looseObject(RESERVED)
   }
-  return { schema, indexes: [...new Set(['email', 'phone', ...(def.indexes ?? [])])], hooks: usersHooks(def.hooks ?? {}) }
+  return { schema, indexes: [...new Set(['email', 'phone', ...(def.indexes ?? [])])], hooks: usersHooks(def.hooks ?? {}), relations: def.relations }
 }
 
 // Хуки приложения - первыми, потом проверки MaBase: email и телефон приводятся
