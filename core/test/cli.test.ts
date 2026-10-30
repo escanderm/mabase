@@ -212,3 +212,33 @@ describe('mabase tail', () => {
     }
   }, 40_000)
 })
+
+describe('mabase superuser', () => {
+  test('134. serve печатает ссылку настройки; superuser upsert/list/delete - и через работающий сервер, и напрямую', async () => {
+    const root = project()
+    expect((await cli(root, 'superuser', 'list')).out).toContain('Администраторов нет')
+    expect((await cli(root, 'superuser', 'upsert', 'x@example.test')).code).toBe(1) // без пароля - подсказка
+    const s = await serve(root)
+    try {
+      await waitFor(() => s.log().includes('/_/#/setup/'), 5000) // ссылка - после проверки, есть ли администратор
+      expect(s.log()).toContain(`админка: ${s.url}/_/`)
+      expect(s.log()).toMatch(/Администратора ещё нет[\s\S]*\/_\/#\/setup\/[\w-]{20,}/)
+      // сервер держит базу - команда идёт к нему
+      const up = await cli(root, 'superuser', 'upsert', 'Root@Example.test', 'root-pass-12')
+      expect(up).toMatchObject({ code: 0, out: expect.stringContaining('root@example.test создан') })
+      expect((await (await fetch(`${s.url}/api/_/setup`)).json()).needed).toBe(false)
+      const login = await post(`${s.url}/api/_/login`, { email: 'root@example.test', password: 'root-pass-12' })
+      expect(login.status).toBe(200)
+      expect((await cli(root, 'superuser', 'upsert', 'root@example.test', 'short')).out).toContain('короче 10')
+    } finally {
+      s.p.kill('SIGTERM')
+      await s.p.exited
+    }
+    expect((await cli(root, 'superuser', 'list')).out).toContain('root@example.test')
+    expect((await cli(root, 'superuser', 'upsert', 'two@example.test', 'two-pass-123')).out).toContain('создан')
+    expect((await cli(root, 'superuser', 'delete', 'root@example.test')).out).toContain('удалён')
+    const last = await cli(root, 'superuser', 'delete', 'two@example.test')
+    expect(last.code).toBe(1)
+    expect(last.out).toContain('последний администратор')
+  }, 60_000)
+})

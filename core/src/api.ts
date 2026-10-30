@@ -12,6 +12,7 @@ import type { ClientLimits } from './access'
 import type { Handler } from './bus'
 import type { EventConfig } from './realtime'
 import type { SchedulerOptions } from './scheduler'
+import type { SuperuserOptions } from './superusers'
 
 export { z, ActionError, defineAction }
 export type { ActionDef, MailMessage }
@@ -31,15 +32,16 @@ export type AppConfig = {
   actions?: ActionDef[]
   auth?: Omit<AuthOptions, 'secret' | 'users' | 'mail' | 'fetch' | 'now'>
   mail?: MailOptions
-  http?: Omit<HttpOptions, 'access' | 'auth' | 'actions' | 'adminToken' | 'onError'>
+  http?: Omit<HttpOptions, 'access' | 'auth' | 'actions' | 'adminToken' | 'adminApi' | 'superusers' | 'onError'>
   limits?: Partial<ClientLimits>
   db?: Pick<DbOptions, 'txTimeoutMs' | 'compactMinBytes' | 'bigTxOps' | 'maxDepth'>
   realtime?: boolean // WebSocket /api/realtime
   events?: Record<string, EventConfig> // что уходит в сокет (design.md §12)
   scheduler?: Omit<SchedulerOptions, 'onError' | 'tail'> // отложенные события: попытки, паузы
+  admin?: { enabled?: boolean; superusers?: Omit<SuperuserOptions, 'now'> } // админка /_/
 }
 
-const CONFIG_KEYS = new Set(['collections', 'actions', 'auth', 'mail', 'http', 'limits', 'db', 'realtime', 'events', 'scheduler'])
+const CONFIG_KEYS = new Set(['collections', 'actions', 'auth', 'mail', 'http', 'limits', 'db', 'realtime', 'events', 'scheduler', 'admin'])
 
 export function defineConfig(cfg: AppConfig): AppConfig {
   for (const k of Object.keys(cfg)) if (!CONFIG_KEYS.has(k)) throw new TypeError(`defineConfig: неизвестный раздел "${k}"`)

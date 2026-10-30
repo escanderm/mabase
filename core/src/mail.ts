@@ -58,13 +58,22 @@ export const DEFAULT_TEMPLATES: Templates = {
 const oneLine = (s: string) => s.replace(/[\r\n]+/g, ' ')
 
 export class Mailer {
-  readonly mode: 'smtp' | 'send' | 'dev'
-  readonly appName: string
-  private from: string
-  private templates: Templates
-  private deliver: (msg: MailMessage) => Promise<void>
+  mode!: 'smtp' | 'send' | 'dev'
+  appName!: string
+  private from!: string
+  private templates!: Templates
+  private deliver!: (msg: MailMessage) => Promise<void>
+  private devHook?: (msg: MailMessage) => void
 
   constructor(opts: MailOptions = {}) {
+    this.devHook = opts.onDevMail
+    this.configure(opts)
+  }
+
+  // Сменить способ отправки на ходу (настройки админки). Куда печатать
+  // письма в режиме разработки - остаётся от конструктора.
+  configure(input: MailOptions): void {
+    const opts = { onDevMail: this.devHook, ...input }
     if (opts.smtp && opts.send) throw new TypeError('mail: либо smtp, либо send')
     this.appName = opts.appName ?? 'MaBase'
     this.from = opts.from ?? `${this.appName} <no-reply@localhost>`

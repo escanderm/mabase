@@ -317,6 +317,27 @@ export class Db {
     }
   }
 
+  isDeclared(name: string): boolean {
+    return this.defs.has(name)
+  }
+
+  // Удалить коллекцию целиком: все документы одной транзакцией, потом
+  // описание и индексы. Для админки; в журнал попадают удаления документов.
+  async drop(name: string): Promise<number> {
+    const n = await this.c[name]!.removeMany({})
+    this.defs.delete(name)
+    this.states.delete(name)
+    this.data.delete(name)
+    return n
+  }
+
+  // Для админки: все коллекции - и объявленные, и те, что есть только в данных.
+  inspect(): { name: string; count: number; indexes: string[]; schema?: Schema }[] {
+    return [...this.states]
+      .map(([name, st]) => ({ name, count: st.docs.size, indexes: [...st.indexes.keys()], schema: this.defs.get(name)?.schema }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }
+
   // ---------- транзакции ----------
 
   // user - кто пишет; доходит до хуков. Вложенная транзакция берёт его у внешней.

@@ -1,4 +1,4 @@
-// mabase update - новая версия с GitHub Releases, как в PocketBase.
+// mabase update - новая версия с GitHub Releases.
 //
 // - Берёт последний релиз: <api>/releases/latest.
 // - Архив под эту ОС и процессор: mabase-<os>-<arch>.tar.gz.

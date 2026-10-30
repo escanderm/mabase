@@ -262,7 +262,7 @@ describe('OAuth', () => {
     const acc = new Access(db2, {})
     const pwOnly = new Auth(acc, { secret: SECRET, appUrl: APP, oauth: { google: { clientId: 'i', clientSecret: 's' } } })
     expect(() => pwOnly.oauthStart('google', { redirectUri: REDIRECT, challenge: ch })).toThrow(expect.objectContaining({ code: 'not_found' }))
-    expect(() => new Auth(acc, { secret: SECRET, appUrl: APP, providers: ['google'] })).toThrow(/clientSecret/)
+    expect(() => new Auth(acc, { secret: SECRET, appUrl: APP, providers: ['google'] })).toThrow(/Client Secret/)
     expect(() => new Auth(acc, { secret: SECRET, providers: ['google'], oauth: { google: { clientId: 'i', clientSecret: 's' } } })).toThrow(/appUrl/)
     expect(() => new Auth(acc, { secret: SECRET, providers: ['vk' as any] })).toThrow(/неизвестный/)
     await db2.close()

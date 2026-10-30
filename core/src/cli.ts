@@ -6,6 +6,7 @@
 //   mabase import <коллекция> <файл.ndjson> [--dir mb_data]
 //   mabase tail   [--dir mb_data]
 //   mabase update [--check]
+//   mabase superuser list | upsert <email> <пароль> | delete <email>
 //
 // Проект - текущая папка: mabase.config.ts, mb_hooks/*.ts, seed.ts. Они
 // импортируют 'mabase' - это виртуальный модуль из бинарника, node_modules не нужен.
@@ -17,10 +18,13 @@ import { openDb } from './db'
 import { LockedError } from './errors'
 import { importNdjson } from './import'
 import { formatTail } from './tail'
+import { superuserCommand } from './superusers'
+import { runWizard, terminalIO } from './wizard'
 import { DEFAULT_API, update } from './update'
 import { openApp, readAdminInfo, startServer, type CollectionConfig, type ServerConfig } from './server'
 
-export const VERSION = '0.1.1'
+export { VERSION } from './version'
+import { VERSION } from './version'
 
 let pluginReady = false
 function registerModule(): void {
@@ -100,6 +104,7 @@ export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): 
     realtime: appCfg.realtime,
     events: appCfg.events,
     scheduler: appCfg.scheduler,
+    admin: appCfg.admin,
     handlers: api.eventHandlers,
     http: { ...appCfg.http, publicDir: flags.public ?? appCfg.http?.publicDir ?? (existsSync(defaultPublic) ? defaultPublic : undefined) },
   }
@@ -137,12 +142,31 @@ export async function run(argv: string[], out: (line: string) => void = console.
       if (hooks.length) out(`  хуки: ${hooks.join(', ')}`)
       if (events.length) out(`  обработчики событий: ${events.join(', ')}`)
       if (s.realtime) out(`  realtime: ${s.url.replace('http', 'ws')}/api/realtime`)
+      if (config.admin?.enabled !== false) out(`  админка: ${s.url}/_/`)
       const stop = async () => {
         await s.stop()
         process.exit(0)
       }
       process.once('SIGINT', stop)
       process.once('SIGTERM', stop)
+      // Первый запуск из терминала - вопросы здесь же; без терминала (systemd,
+      // Docker) или если пропустили - ссылка для браузера.
+      if (s.setupUrl && process.stdin.isTTY && process.stdout.isTTY && !process.env.CI) {
+        const io = terminalIO()
+        const done = await runWizard(io, { superusers: s.superusers, settings: s.settings, url: s.url })
+          .catch((err) => {
+            out(`[mabase] мастер настройки: ${err?.message ?? err}`)
+            return false
+          })
+          .finally(() => io.close())
+        if (done) return
+      }
+      if (s.setupUrl && (await s.superusers.count()) === 0) {
+        out('')
+        out('(!) Администратора ещё нет. Откройте ссылку, чтобы создать первого:')
+        out(`    ${s.setupUrl}`)
+        out('    Или: mabase superuser upsert <email> <пароль>')
+      }
       return
     }
     case 'seed': {
@@ -218,6 +242,30 @@ export async function run(argv: string[], out: (line: string) => void = console.
     case 'version':
       out(VERSION)
       return
+    case 'superuser': {
+      const [op, email, password] = args
+      if (!['list', 'upsert', 'delete'].includes(op ?? '') || (op !== 'list' && !email) || (op === 'upsert' && !password)) {
+        throw new UsageError('mabase superuser list | upsert <email> <пароль> | delete <email>')
+      }
+      const cmd = { op, email, password }
+      let r: any
+      try {
+        const { config } = await loadProject(flags)
+        const app = await openApp(config)
+        try {
+          r = await superuserCommand(app.superusers, cmd)
+        } finally {
+          await app.close()
+        }
+      } catch (err) {
+        if (!(err instanceof LockedError)) throw err
+        r = await viaServer(flags.dir, '/api/admin/superuser', { method: 'POST', body: JSON.stringify(cmd), headers: { 'Content-Type': 'application/json' } })
+      }
+      if (op === 'list') out(r.length ? r.map((x: any) => `${x.email}  (создан ${new Date(x.createdAt).toLocaleString('ru-RU')})`).join('\n') : 'Администраторов нет')
+      else if (op === 'upsert') out(r.created ? `Администратор ${r.email} создан` : `Пароль ${r.email} изменён, его сессии закрыты`)
+      else out(`Администратор ${email} удалён`)
+      return
+    }
     case 'update': {
       // Из исходников обновлять нечего: process.execPath - это сам bun
       if (!import.meta.url.includes('$bunfs')) throw new UsageError('update работает только в собранном бинарнике')
@@ -245,6 +293,8 @@ const HELP = `MaBase ${VERSION}
   mabase backup <папка>
   mabase import <коллекция> <файл.ndjson>
   mabase tail   - живой журнал работающего сервера: коммиты, действия, события, ошибки
+  mabase superuser list | upsert <email> <пароль> | delete <email>
+                - администраторы админки /_/
   mabase update  [--check] - скачать новую версию с GitHub и заменить этот файл
   mabase version`
 

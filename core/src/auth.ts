@@ -55,6 +55,9 @@ export type AuthOptions = {
   now?: () => number
 }
 
+// Что можно менять на ходу (настройки админки).
+export type AuthSettings = Pick<AuthOptions, 'providers' | 'signup' | 'minPasswordLength' | 'oauth' | 'appUrl'>
+
 export type Session = {
   user: Doc // как его видит сам пользователь: без passwordHash
   accessToken: string
@@ -135,7 +138,7 @@ function parseRefresh(token: unknown): { sid: string; secret: string } | null {
 }
 
 // Не больше max задач сразу, остальные ждут.
-class Limiter {
+export class Limiter {
   private active = 0
   private waiting: Array<() => void> = []
   constructor(private max: number) {}
@@ -155,7 +158,7 @@ class Limiter {
 
 // Попытки входа на ключ (email или телефон + IP). Попытка считается до
 // проверки: параллельные запросы не обойдут лимит. Удачный вход сбрасывает счёт.
-class Attempts {
+export class Attempts {
   private m = new Map<string, { n: number; until: number }>()
   constructor(
     private max: number,
@@ -238,12 +241,12 @@ async function checkContacts(db: Db, doc: Doc, id: string, prev?: Doc): Promise<
 
 export class Auth {
   readonly db: Db
-  private providers: Set<AuthProvider>
-  private signup: boolean
+  private providers!: Set<AuthProvider>
+  private signup!: boolean
   private accessMs: number
   private refreshMs: number
   private graceMs: number
-  private minPassword: number
+  private minPassword!: number
   private hashes: Limiter
   private attempts: Attempts
   private authphoneUrl: string
@@ -251,8 +254,9 @@ export class Auth {
   private fetch: NonNullable<AuthOptions['fetch']>
   private now: () => number
   private dummy: Promise<string> | null = null
+  private oauth: Partial<Record<OAuthProviderName, OAuthClient>> = {}
   readonly mail: Mailer
-  private appUrl: string
+  private appUrl!: string
   private mailIntervalMs: number
   private onError: (err: unknown, where: string) => void
   private background = new Set<Promise<void>>()
@@ -267,19 +271,11 @@ export class Auth {
       throw new TypeError('auth.secret: нужна строка не короче 32 символов, из переменной окружения')
     }
     this.db = access.db
-    this.providers = new Set(opts.providers ?? ['password'])
-    for (const p of this.providers) {
-      if (p === 'password' || p === 'authphone') continue
-      if (!(p in OAUTH_PROVIDERS)) throw new TypeError(`auth.providers: неизвестный способ входа ${p}`)
-      const c = opts.oauth?.[p as OAuthProviderName]
-      if (!c?.clientId || !c?.clientSecret) throw new TypeError(`auth.oauth.${p}: нужны clientId и clientSecret`)
-      if (!opts.appUrl) throw new TypeError(`auth.appUrl: адрес фронтенда, куда вернуть пользователя после входа через ${p}`)
-    }
-    this.signup = opts.signup ?? true
+    this.mail = opts.mail ?? new Mailer()
+    this.configure(opts)
     this.accessMs = parseDuration(opts.accessTtl ?? '15m')
     this.refreshMs = parseDuration(opts.refreshTtl ?? '30d')
     this.graceMs = opts.refreshGraceMs ?? 30_000
-    this.minPassword = opts.minPasswordLength ?? 8
     this.hashes = new Limiter(opts.hashConcurrency ?? 2)
     this.now = opts.now ?? Date.now
     const limit = opts.loginLimit ?? { attempts: 10, windowMs: 15 * 60_000 }
@@ -287,15 +283,43 @@ export class Auth {
     this.authphoneUrl = (opts.authphone?.url ?? 'https://authphone.su').replace(/\/$/, '')
     this.authphoneTimeout = opts.authphone?.timeoutMs ?? 5000
     this.fetch = opts.fetch ?? ((url, init) => fetch(url, init))
-    this.mail = opts.mail ?? new Mailer()
-    // В режиме разработки ссылка без адреса - путь; иначе ссылка из письма никуда не ведёт.
-    if (this.mail.mode !== 'dev' && !opts.appUrl) throw new TypeError('auth.appUrl: адрес фронтенда для ссылок в письмах')
-    this.appUrl = (opts.appUrl ?? '').replace(/\/$/, '')
     this.mailIntervalMs = opts.mailIntervalMs ?? 60_000
     this.onError = opts.onError ?? ((err, where) => console.error(`[mabase] ошибка в ${where}`, err))
     this.db.collection(USERS, usersDef(opts.users ?? {}))
     this.db.collection(AUTH_TOKENS, { indexes: ['userId'] })
     this.db.collection(EXTERNAL_AUTHS, { indexes: ['providerId', 'userId'] })
+  }
+
+  // Способы входа, регистрация, OAuth, адрес приложения. Из конфига при
+  // старте или из настроек админки на ходу. Ошибка - ничего не меняется.
+  configure(o: AuthSettings): void {
+    const c = Auth.check(o, this.mail.mode)
+    this.providers = c.providers
+    this.signup = c.signup
+    this.minPassword = c.minPassword
+    this.oauth = c.oauth
+    this.appUrl = c.appUrl
+  }
+
+  static check(o: AuthSettings, mailMode: Mailer['mode']) {
+    const providers = new Set(o.providers ?? ['password'])
+    for (const p of providers) {
+      if (p === 'password' || p === 'authphone') continue
+      if (!(p in OAUTH_PROVIDERS)) throw new TypeError(`auth.providers: неизвестный способ входа ${p}`)
+      const c = o.oauth?.[p as OAuthProviderName]
+      const title = p === 'github' ? 'GitHub' : p[0]!.toUpperCase() + p.slice(1)
+      if (!c?.clientId || !c?.clientSecret) throw new TypeError(`${title}: нужны Client ID и Client Secret (auth.oauth.${p})`)
+      if (!o.appUrl) throw new TypeError(`Нужен адрес приложения (auth.appUrl): туда вернётся пользователь после входа через ${title}`)
+    }
+    // В режиме разработки ссылка без адреса - путь; иначе ссылка из письма никуда не ведёт.
+    if (mailMode !== 'dev' && !o.appUrl) throw new TypeError('Нужен адрес приложения (auth.appUrl): на него ведут ссылки из писем')
+    const minPassword = o.minPasswordLength ?? 8
+    if (!Number.isInteger(minPassword) || minPassword < 6 || minPassword > 128) throw new TypeError('auth.minPasswordLength: от 6 до 128')
+    return { providers, signup: o.signup ?? true, minPassword, oauth: { ...o.oauth }, appUrl: (o.appUrl ?? '').replace(/\/$/, '') }
+  }
+
+  get settings(): Required<Pick<AuthSettings, 'providers' | 'signup' | 'minPasswordLength' | 'appUrl'>> {
+    return { providers: [...this.providers], signup: this.signup, minPasswordLength: this.minPassword, appUrl: this.appUrl }
   }
 
   // ---------- для клиента: /api/auth/* ----------
@@ -571,7 +595,7 @@ export class Auth {
     const d = OAUTH_PROVIDERS[p]
     const q = new URLSearchParams({
       response_type: 'code',
-      client_id: this.opts.oauth![p]!.clientId,
+      client_id: this.oauth[p]!.clientId,
       redirect_uri: args.redirectUri,
       scope: d.scopes.join(' '),
       state,
@@ -593,7 +617,7 @@ export class Auth {
       let profile: OAuthProfile
       try {
         const signal = AbortSignal.timeout(10_000)
-        const token = await exchangeCode(d, this.opts.oauth![st.provider]!, { code: q.code, redirectUri: st.redirectUri, verifier: st.verifier }, this.fetch, signal)
+        const token = await exchangeCode(d, this.oauth[st.provider]!, { code: q.code, redirectUri: st.redirectUri, verifier: st.verifier }, this.fetch, signal)
         profile = await d.profile(token, this.fetch, signal)
       } catch (err) {
         this.onError(err, `oauth ${st.provider}`)
@@ -645,8 +669,8 @@ export class Auth {
   }
 
   // Кто это. По порядку: уже привязан; привязать к вошедшему; подтверждённый
-  // у провайдера email есть у пользователя - привязать к нему (как в
-  // PocketBase); иначе - новый пользователь.
+  // у провайдера email есть у пользователя - привязать к нему; иначе -
+  // новый пользователь.
   private async oauthUser(provider: OAuthProviderName, p: OAuthProfile, linkTo: string | null): Promise<string> {
     let email: string | undefined
     try {

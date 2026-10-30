@@ -168,7 +168,7 @@ export function applyUpdate(doc: Doc, update: Update): Doc {
     const cur = getPath(next, k)
     if (cur === undefined) continue
     if (!Array.isArray(cur)) throw new QueryError(`$pull.${k}: поле не массив`)
-    // как в Mongo: значение - удалить равные, объект - удалить подходящие под условие
+    // значение - удалить равные, объект - удалить подходящие под условие
     const test = sift(v as any) as (x: unknown) => boolean
     setPath(next, k, cur.filter((x) => !test(x)))
   }

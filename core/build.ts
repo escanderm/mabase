@@ -13,9 +13,10 @@
 // (bun-linux-arm64 и т.д.).
 import { $ } from 'bun'
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { VERSION } from './src/cli'
+import { VERSION } from './src/version'
+import { buildAdmin } from './src/admin/bundle'
 import { buildSdk } from './src/sdk'
 import { assetName, tar } from './src/update'
 
@@ -37,15 +38,21 @@ const sdk = await buildSdk()
 mkdirSync('src/generated', { recursive: true })
 writeFileSync('src/generated/client.ts', `// Сгенерировано build.ts - не править\nexport default ${JSON.stringify(sdk)}\n`)
 await Bun.write('dist/client.js', sdk)
+// Скрипт админки /_/ - тоже внутрь
+writeFileSync('src/generated/admin.ts', `// Сгенерировано build.ts - не править\nexport default ${JSON.stringify(await buildAdmin())}\n`)
 
 async function compile(out: string, target?: string): Promise<void> {
   const local = target && process.env.BUN_TARGETS_DIR && join(process.env.BUN_TARGETS_DIR, target)
   const flags = !target ? [] : local && existsSync(local) ? [`--target=${target}`, `--compile-executable-path=${local}`] : [`--target=${target}`]
-  await $`bun build --compile --minify ${flags} src/cli.ts --outfile ${out}`.quiet()
+  // Сборка рядом и подмена через rename: запись поверх запущенного
+  // бинарника на macOS убивает работающий из него сервер.
+  const tmp = `${out}.new`
+  await $`bun build --compile --minify ${flags} src/cli.ts --outfile ${tmp}`.quiet()
   if (target ? target.startsWith('bun-darwin') : process.platform === 'darwin') {
-    await $`codesign --remove-signature ${out}`
-    await $`codesign -s - ${out}`
+    await $`codesign --remove-signature ${tmp}`
+    await $`codesign -s - ${tmp}`
   }
+  renameSync(tmp, out)
 }
 
 if (!release) {

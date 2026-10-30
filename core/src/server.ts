@@ -16,6 +16,10 @@ import { Mailer, type MailMessage, type MailOptions } from './mail'
 import { checkEvents, PRESENCE, Realtime, type Conn, type EventConfig } from './realtime'
 import { Scheduler, type SchedulerOptions } from './scheduler'
 import { Tail } from './tail'
+import { createAdminApi } from './admin-api'
+import { Superusers, type SuperuserOptions } from './superusers'
+import { Settings } from './settings'
+import { Registry } from './registry'
 
 export type CollectionConfig = CollectionDef & AccessDef
 
@@ -27,7 +31,8 @@ export type ServerConfig = {
   actions?: ActionDef[]
   auth?: Omit<AuthOptions, 'secret' | 'users' | 'mail'> & { secret?: string }
   mail?: MailOptions
-  http?: Omit<HttpOptions, 'access' | 'auth' | 'actions' | 'adminToken'>
+  http?: Omit<HttpOptions, 'access' | 'auth' | 'actions' | 'adminToken' | 'adminApi' | 'superusers'>
+  admin?: { enabled?: boolean; superusers?: SuperuserOptions } // админка /_/; enabled: false - выключить
   limits?: Partial<ClientLimits>
   db?: Omit<DbOptions, 'dir'>
   dev?: boolean // режим разработки: проверка dependsOn у правил
@@ -61,7 +66,7 @@ export function loadSecret(dataDir: string, env: Record<string, string | undefin
   return secret
 }
 
-export type App = { db: Db; access: Access; auth: Auth; actions: Actions; mail: Mailer; tail: Tail; bus: Bus; close: () => Promise<void> }
+export type App = { db: Db; access: Access; auth: Auth; actions: Actions; mail: Mailer; tail: Tail; bus: Bus; superusers: Superusers; settings: Settings; registry: Registry; close: () => Promise<void> }
 
 // База, доступ, вход и действия - без HTTP. Для сида и импорта при
 // остановленном сервере и как основа startServer.
@@ -118,9 +123,10 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
         devMail(m)
       },
     })
+    const secret = cfg.auth?.secret ?? loadSecret(cfg.dataDir, env, warn)
     const auth = new Auth(access, {
       ...cfg.auth,
-      secret: cfg.auth?.secret ?? loadSecret(cfg.dataDir, env, warn),
+      secret,
       users: usersCfg && { schema: usersCfg.schema, indexes: usersCfg.indexes, hooks: usersCfg.hooks },
       mail,
       onError: (err, where) => onError(err, where),
@@ -128,6 +134,18 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
     const actions = new Actions(db, cfg.actions ?? [], { onError: (err, info) => onError(err, `действие ${info.name}`) })
     actions.onRun((r) => tail.publish('action', { name: r.name, user: r.userId, ms: Math.round(r.ms), ok: r.ok, code: r.code }))
     const bus = new Bus(db, cfg.handlers ?? (() => new Map()), { onError, tail })
+    const superusers = new Superusers(db, cfg.admin?.superusers)
+    // Код главнее админки: способы входа или отправка почты заданы в конфиге -
+    // этот раздел настроек админка только показывает.
+    const a = cfg.auth ?? {}
+    const fixed = {
+      auth: ['providers', 'signup', 'oauth', 'appUrl', 'minPasswordLength'].some((k) => (a as any)[k] !== undefined),
+      mail: !!(cfg.mail?.smtp || cfg.mail?.send),
+    }
+    const settings = new Settings(db, secret, auth, mail, fixed)
+    await settings.load(warn)
+    const registry = new Registry(db)
+    await registry.load(warn)
     return {
       db,
       access,
@@ -136,6 +154,9 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
       mail,
       tail,
       bus,
+      superusers,
+      settings,
+      registry,
       close: async () => {
         await auth.settled()
         await bus.settled()
@@ -160,7 +181,8 @@ export function readAdminInfo(dataDir: string): AdminInfo | null {
   }
 }
 
-export type RunningServer = App & { url: string; adminToken: string; realtime: Realtime | null; scheduler: Scheduler; stop: () => Promise<void> }
+// setupUrl - ссылка первичной настройки админки, пока нет ни одного суперпользователя.
+export type RunningServer = App & { url: string; adminToken: string; setupUrl: string | null; realtime: Realtime | null; scheduler: Scheduler; stop: () => Promise<void> }
 
 export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
   const warn = cfg.onWarning ?? ((m: string) => console.warn(`[mabase] ${m}`))
@@ -168,7 +190,8 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
   try {
     if (app.mail.mode === 'dev') warn('Почта не настроена: письма печатаются в консоль')
     const adminToken = randomBytes(32).toString('base64url')
-    const handle = createHandler({ ...cfg.http, access: app.access, auth: app.auth, actions: app.actions, adminToken, tail: app.tail })
+    const adminApi = cfg.admin?.enabled === false ? undefined : createAdminApi({ access: app.access, superusers: app.superusers, settings: app.settings, registry: app.registry, mail: app.mail, tail: app.tail })
+    const handle = createHandler({ ...cfg.http, access: app.access, auth: app.auth, actions: app.actions, adminToken, tail: app.tail, adminApi, superusers: app.superusers })
     let rt: Realtime | null = null
     if (cfg.realtime) {
       rt = new Realtime(app.access, app.auth, { events: cfg.events, tail: app.tail, onError: (err, where) => app.tail.publish('error', { where, error: String(err) }) })
@@ -221,11 +244,13 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
     const url = `http://${host.includes(':') ? `[${host}]` : host}:${server.port}`
     const adminPath = join(cfg.dataDir, ADMIN_FILE)
     writePrivate(adminPath, JSON.stringify({ url, token: adminToken, pid: process.pid } satisfies AdminInfo) + '\n')
+    const setup = adminApi ? await app.superusers.installToken() : null
     let stopped: Promise<void> | null = null
     return {
       ...app,
       url,
       adminToken,
+      setupUrl: setup && `${url}/_/#/setup/${setup}`,
       realtime,
       scheduler,
       stop: () =>

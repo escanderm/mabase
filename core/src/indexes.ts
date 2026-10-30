@@ -129,7 +129,7 @@ export class FieldIndex {
     return this.lists.get(indexKey(v)) ?? []
   }
 
-  // Значения в диапазоне по порядку. Как в Mongo, диапазон не выходит за тип
+  // Значения в диапазоне по порядку. Диапазон не выходит за тип
   // границы: { $gt: 5 } - только числа.
   range(lo: Bound | undefined, hi: Bound | undefined): Key[] {
     const r = rank((lo ?? hi)!.v)

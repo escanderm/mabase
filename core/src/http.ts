@@ -17,7 +17,10 @@ import { importNdjson } from './import'
 import { sdkBundle } from './sdk'
 import type { User } from './db'
 import { ActionError, ReadOnlyError, TxTimeoutError } from './errors'
-import type { Tail } from './tail'
+import { adminAsset } from './admin/bundle'
+import type { createAdminApi } from './admin-api'
+import { superuserCommand, type Superusers } from './superusers'
+import { tailResponse, type Tail } from './tail'
 
 export type HttpOptions = {
   access: Access
@@ -30,6 +33,8 @@ export type HttpOptions = {
   maxImportBytes?: number // импорт через admin: 256 МБ
   adminToken?: string // /api/admin/*; нет - admin выключен
   tail?: Tail // GET /api/admin/tail - поток для mabase tail
+  adminApi?: ReturnType<typeof createAdminApi> // /api/_/* и интерфейс /_/; нет - админки нет
+  superusers?: Superusers // mabase superuser через работающий сервер
   publicDir?: string // статика; путь без расширения, которого нет, - index.html (SPA)
   onError?: (err: unknown, info: { method: string; path: string }) => void
 }
@@ -136,7 +141,9 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
     }
     let res: Response
     try {
-      res = path === '/api' || path.startsWith('/api/') ? await api(req, url, meta) : await staticFile(req, path)
+      if (path === '/api' || path.startsWith('/api/')) res = await api(req, url, meta)
+      else if (opts.adminApi && (path === '/_' || path.startsWith('/_/'))) res = await adminAsset(req, path)
+      else res = await staticFile(req, path)
     } catch (err) {
       res = errorResponse(err, req, path)
     }
@@ -222,6 +229,7 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
 
     if (parts[0] === 'auth') return authRoute(req, url, parts.slice(1).join('/'), meta, user, body)
     if (parts[0] === 'admin' && opts.adminToken) return admin(req, parts.slice(1), meta)
+    if (parts[0] === '_' && opts.adminApi) return opts.adminApi({ req, url, parts: parts.slice(1), ip: clientIp(req, meta), body })
     throw new HttpError(404, 'not_found', 'Нет такого адреса')
   }
 
@@ -305,35 +313,7 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
     const token = /^Bearer (\S+)$/.exec(req.headers.get('authorization') ?? '')?.[1]
     if (!isLoopback(meta.ip) || !token || !safeEqualStr(token, opts.adminToken!)) throw new HttpError(404, 'not_found', 'Нет такого адреса')
     const [cmd, arg] = parts
-    // Поток NDJSON: строка на запись журнала, пока CLI не отключится.
-    // Пустая строка раз в 5 с: иначе Bun.serve рвёт молчащее соединение
-    // через 10 с (idleTimeout). CLI пустые строки пропускает.
-    if (cmd === 'tail' && !arg && req.method === 'GET' && opts.tail) {
-      let off = () => {}
-      const enc = new TextEncoder()
-      const stream = new ReadableStream<Uint8Array>({
-        start(ctrl) {
-          const send = (line: string) => {
-            try {
-              ctrl.enqueue(enc.encode(line + '\n'))
-            } catch {
-              off()
-            }
-          }
-          send(JSON.stringify({ ts: Date.now(), kind: 'tail', status: 'подключено' }))
-          const unlisten = opts.tail!.listen((e) => send(JSON.stringify(e)))
-          const beat = setInterval(() => send(''), 5000)
-          off = () => {
-            clearInterval(beat)
-            unlisten()
-          }
-        },
-        cancel() {
-          off()
-        },
-      })
-      return new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' } })
-    }
+    if (cmd === 'tail' && !arg && req.method === 'GET' && opts.tail) return tailResponse(opts.tail)
     if (req.method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Только POST')
     if (cmd === 'compact' && !arg) {
       await db.compact()
@@ -348,6 +328,10 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
       }
       if (typeof b.dir !== 'string' || !b.dir) throw bad('dir - папка для бэкапа')
       return json(await db.backup(resolve(b.dir)))
+    }
+    if (cmd === 'superuser' && !arg && opts.superusers) {
+      const text = await readBody(req, maxBody)
+      return json(await clientErrors(async () => superuserCommand(opts.superusers!, JSON.parse(text || '{}'))))
     }
     // Импорт: NDJSON, пачками по 1000 в транзакции, мимо правил и лимитов.
     // Документ с _id, который уже есть, пропускается: повторный импорт безопасен.

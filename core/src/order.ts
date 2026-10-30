@@ -1,4 +1,4 @@
-// Порядок значений - как в Mongo: null и отсутствующее < числа < строки <
+// Порядок значений: null и отсутствующее < числа < строки <
 // объекты < булевы. Один и тот же порядок у индекса и у сортировки в памяти,
 // иначе ответ зависел бы от того, нашёлся ли индекс.
 import { QueryError } from './errors'
@@ -31,7 +31,7 @@ export function compareValues(a: unknown, b: unknown): number {
 
 export const compareIds = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 
-// Ключ сортировки поля-массива - как в Mongo: по возрастанию наименьший
+// Ключ сортировки поля-массива: по возрастанию наименьший
 // элемент, по убыванию наибольший.
 export function sortKey(doc: Doc, parts: readonly string[], dir: Dir): unknown {
   const vals = pathValues(doc, parts)
