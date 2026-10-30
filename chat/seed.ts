@@ -27,5 +27,8 @@ export default defineSeed(async ({ db, auth }) => {
     )
   }
 
-  await db.invites.upsert({ _id: 'carol-to-general' }, { roomId: 'general', from: alice._id, to: carol._id })
+  await db.invites.upsert(
+    { _id: 'carol-to-general' },
+    { roomId: 'general', roomName: 'Общая', from: alice._id, fromName: 'Алиса', to: carol._id },
+  )
 })

@@ -29,6 +29,7 @@ export type ServerConfig = {
   http?: Omit<HttpOptions, 'access' | 'auth' | 'actions' | 'adminToken'>
   limits?: Partial<ClientLimits>
   db?: Omit<DbOptions, 'dir'>
+  dev?: boolean // режим разработки: проверка dependsOn у правил
   realtime?: boolean // WebSocket /api/realtime
   events?: Record<string, EventConfig>
   handlers?: () => ReadonlyMap<string, readonly Handler[]> // on() из mb_hooks
@@ -97,7 +98,14 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
       accessDefs[name] = { rules: c.rules, fields: c.fields, owner: c.owner }
     }
     if (usersCfg) accessDefs[USERS] = { rules: usersCfg.rules, fields: usersCfg.fields }
-    const access = new Access(db, accessDefs, cfg.limits)
+    const access = new Access(db, accessDefs, cfg.limits, {
+      onRuleWarning: cfg.dev
+        ? (m) => {
+            tail.publish('warning', { message: m })
+            warn(m)
+          }
+        : undefined,
+    })
     const print = (m: MailMessage) =>
       console.log(`[mabase] письмо (почта не настроена - режим разработки)\n  кому: ${m.to}\n  тема: ${m.subject}\n\n${m.text}`)
     const devMail = cfg.mail?.onDevMail ?? print

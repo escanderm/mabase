@@ -88,9 +88,12 @@ const messages = defineCollection('messages', {
 })
 
 const invites = defineCollection('invites', {
+  // имя комнаты и пригласившего - копией: приглашённый ещё не видит ни комнату, ни автора
   schema: z.object({
     roomId: z.string(),
+    roomName: z.string().optional(),
     from: z.string(),
+    fromName: z.string().optional(),
     to: z.string(),
   }),
   indexes: ['to', 'roomId'],
@@ -121,17 +124,22 @@ const createRoom = defineAction('createRoom', {
     db.rooms.insert({ name: input.name, ownerId: user.id, participants: [user.id] }),
 })
 
+// Приглашение по email: id незнакомого человека клиент не знает - правило
+// users показывает только контакты. Действие идёт мимо правил и находит сам.
 const invite = defineAction('invite', {
-  input: z.object({ roomId: z.string(), userId: z.string() }),
+  input: z.object({ roomId: z.string(), email: z.string().email() }),
   handler: async ({ input, user, db, emit }) => {
     const room = await db.rooms.findOne({ _id: input.roomId, ownerId: user.id })
     if (!room) throw new ActionError('not_found', 'Комната не найдена') // [Q9]
-    if (room.participants.includes(input.userId)) throw new ActionError('conflict', 'Уже в комнате')
+    const to = await db.users.findOne({ email: input.email.trim().toLowerCase() })
+    if (!to) throw new ActionError('not_found', 'Пользователь с таким email не найден')
+    if (room.participants.includes(to._id)) throw new ActionError('conflict', 'Уже в комнате')
 
-    const existing = await db.invites.findOne({ roomId: room._id, to: input.userId })
+    const existing = await db.invites.findOne({ roomId: room._id, to: to._id })
     if (existing) return existing
 
-    const inv = await db.invites.insert({ roomId: room._id, from: user.id, to: input.userId })
+    const me = await db.users.findOne({ _id: user.id })
+    const inv = await db.invites.insert({ roomId: room._id, roomName: room.name, from: user.id, fromName: me?.name, to: to._id })
     // письмо отправит отдельный обработчик; задача попадёт в ту же транзакцию
     emit('invite.email', { inviteId: inv._id }, { after: '0s', key: `invite:${inv._id}` })
     return inv

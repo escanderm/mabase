@@ -14,6 +14,7 @@ import { clientErrors, type Access } from './access'
 import { toClientError, type Actions } from './actions'
 import { USERS, type Auth } from './auth'
 import { importNdjson } from './import'
+import { sdkBundle } from './sdk'
 import type { User } from './db'
 import { ActionError, ReadOnlyError, TxTimeoutError } from './errors'
 import type { Tail } from './tail'
@@ -139,7 +140,7 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
     } catch (err) {
       res = errorResponse(err, req, path)
     }
-    if (path.startsWith('/api/')) res.headers.set('Cache-Control', 'no-store')
+    if (path.startsWith('/api/') && !res.headers.has('Cache-Control')) res.headers.set('Cache-Control', 'no-store')
     for (const [k, v] of Object.entries(extra)) res.headers.set(k, v)
     return res
   }
@@ -175,6 +176,9 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
     }
 
     if (route === 'GET health' && parts.length === 1) return json({ ok: true })
+    if (route === 'GET client.js' && parts.length === 1) {
+      return new Response(await sdkBundle(), { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=300' } })
+    }
 
     if (parts[0] === 'c' && parts[1]) {
       const c = parts[1]

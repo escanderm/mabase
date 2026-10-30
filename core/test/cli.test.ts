@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseArgs } from '../src/cli'
 import { openDb } from '../src/db'
-import { tmpDir, waitFor } from './helpers'
+import { sleep, tmpDir, waitFor } from './helpers'
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts')
 
@@ -147,4 +147,44 @@ describe('CLI', () => {
     expect(() => parseArgs(['serve', '--port', '99999'])).toThrow('--port')
     expect(parseArgs([]).cmd).toBe('help')
   }, 30_000)
+})
+
+describe('чат из папки chat/', () => {
+  test('114. serve --dev на проекте chat/: фронтенд, SDK с сервера, правила без предупреждений dependsOn', async () => {
+    const { cpSync } = await import('node:fs')
+    const root = tmpDir('chat-app')
+    for (const f of ['mabase.config.ts', 'seed.ts', 'mb_hooks', 'mb_public']) cpSync(join(import.meta.dir, '..', '..', 'chat', f), join(root, f), { recursive: true })
+    expect((await cli(root, 'seed')).code).toBe(0)
+    const p = Bun.spawn(['bun', CLI, 'serve', '--dev', '--port', '0', '--host', '127.0.0.1', '--root', root], { stdout: 'pipe', stderr: 'pipe' })
+    let log = ''
+    const read = async (s: ReadableStream<Uint8Array>) => {
+      for await (const chunk of s as unknown as AsyncIterable<Uint8Array>) log += new TextDecoder().decode(chunk)
+    }
+    void read(p.stdout)
+    void read(p.stderr)
+    try {
+      await waitFor(() => /MaBase [\d.]+: (http\S+)/.test(log), 15_000)
+      const url = /MaBase [\d.]+: (http\S+)/.exec(log)![1]!
+      const index = await fetch(url + '/')
+      expect(await index.text()).toContain('<script type="module" src="/app.js">')
+      expect((await fetch(url + '/app.js')).status).toBe(200)
+      expect((await fetch(url + '/rooms/general')).status).toBe(200) // SPA
+      const sdk = await fetch(url + '/api/client.js')
+      expect(sdk.headers.get('content-type')).toContain('javascript')
+      expect(await sdk.text()).toContain('createClient')
+
+      // все правила чата с чтением других коллекций: list/view users, rooms, messages, _presence, invites
+      const login = await (await post(`${url}/api/auth/login`, { email: 'bob@example.test', password: 'dev-bob-1' })).json()
+      const auth = { Authorization: `Bearer ${login.accessToken}` }
+      for (const c of ['users', 'rooms', 'messages', '_presence', 'invites']) expect((await fetch(`${url}/api/c/${c}`, { headers: auth })).status).toBe(200)
+      expect((await fetch(`${url}/api/c/messages/${'x'}`, { headers: auth })).status).toBe(404) // view
+      expect((await post(`${url}/api/c/messages`, { roomId: 'general', text: 'проверка create' }, login.accessToken)).status).toBe(200)
+      await sleep(100)
+      expect(log).not.toContain('читает коллекцию') // текст предупреждения --dev
+      expect(log).toContain('режим разработки')
+    } finally {
+      p.kill('SIGTERM')
+      await p.exited
+    }
+  }, 60_000)
 })

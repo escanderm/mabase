@@ -469,7 +469,7 @@ describe('пример-чат по WebSocket', () => {
     const { loadProject, parseArgs } = await import('../src/cli')
     const { openApp } = await import('../src/server')
     const root = tmpDir('chat-rt')
-    for (const f of ['mabase.config.ts', 'seed.ts', 'mb_hooks']) cpSync(join(import.meta.dir, '..', '..', 'examples', 'chat', f), join(root, f), { recursive: true })
+    for (const f of ['mabase.config.ts', 'seed.ts', 'mb_hooks']) cpSync(join(import.meta.dir, '..', '..', 'chat', f), join(root, f), { recursive: true })
     const { flags } = parseArgs(['serve', '--root', root, '--port', '0', '--host', '127.0.0.1'])
     const { config, seed } = await loadProject(flags, { seed: true })
     config.env = {}

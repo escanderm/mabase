@@ -230,7 +230,7 @@ describe('emit', () => {
   })
 })
 
-// Логика из examples/chat/mabase.config.ts на настоящем ядре: ровно те действия.
+// Логика из chat/mabase.config.ts на настоящем ядре: ровно те действия.
 describe('чат на действиях', () => {
   const roomActions = () => [
     defineAction('createRoom', {

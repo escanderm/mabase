@@ -1,0 +1,76 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #fff;
+  --text: #1d2330;
+  --muted: #6b7385;
+  --line: #e3e6ec;
+  --accent: #2f6fed;
+  --mine: #e8f0ff;
+  --danger: #c43c3c;
+  --ok: #2e9b5f;
+  font: 15px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171d; --panel: #1c2028; --text: #e6e9ef; --muted: #8b93a5; --line: #2b313c; --mine: #20304f; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; height: 100vh; }
+[hidden] { display: none !important; }
+button { font: inherit; border: 0; border-radius: 6px; padding: 6px 12px; background: var(--accent); color: #fff; cursor: pointer; }
+button.secondary { background: var(--line); color: var(--text); }
+button.danger { background: var(--danger); }
+button.link { background: none; color: var(--accent); padding: 2px 4px; }
+input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); min-width: 0; }
+.row { display: flex; gap: 6px; align-items: center; }
+.row input { flex: 1; }
+.hint { color: var(--muted); font-size: 13px; }
+.error { color: var(--danger); min-height: 1.4em; }
+
+#login { display: grid; place-items: center; height: 100%; padding: 16px; }
+.card { background: var(--panel); padding: 24px; border-radius: 12px; width: min(380px, 100%); display: grid; gap: 12px; box-shadow: 0 2px 12px #0001; }
+.card h1 { margin: 0; font-size: 20px; }
+.card label { display: grid; gap: 4px; }
+
+#app { display: grid; grid-template-columns: 280px 1fr; height: 100%; }
+aside { background: var(--panel); border-right: 1px solid var(--line); padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+aside header { display: flex; gap: 8px; align-items: center; }
+aside h2 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 14px 0 2px; }
+.conn { font-size: 12px; color: var(--muted); }
+.conn::before { content: '●'; margin-right: 3px; }
+.conn.online::before { color: var(--ok); }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { padding: 5px 8px; border-radius: 6px; display: flex; gap: 6px; align-items: center; }
+.list li.active { background: var(--mine); }
+.list li.room { cursor: pointer; }
+.list li.room:hover { background: var(--line); }
+.list .empty { color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; }
+
+main { display: flex; flex-direction: column; min-height: 0; }
+.placeholder { margin: auto; color: var(--muted); }
+#room { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+#room header { display: flex; gap: 10px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+#room header h1 { font-size: 18px; margin: 0; cursor: text; }
+#room-people { color: var(--muted); font-size: 13px; }
+#room-people .kick { color: var(--danger); background: none; padding: 0 2px; }
+.spacer { flex: 1; }
+#messages { flex: 1; overflow-y: auto; padding: 10px 14px; }
+#more { display: block; margin: 0 auto 8px; }
+#message-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.msg { max-width: 70%; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; }
+.msg.mine { align-self: flex-end; background: var(--mine); }
+.msg .meta { font-size: 12px; color: var(--muted); display: flex; gap: 6px; }
+.msg .text { white-space: pre-wrap; word-break: break-word; }
+.msg .meta button { background: none; color: var(--muted); padding: 0; font-size: 12px; }
+#typing { padding: 0 14px; min-height: 1.4em; }
+#send { padding: 10px 14px; border-top: 1px solid var(--line); background: var(--panel); }
+
+#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+#toast.show { opacity: 0.92; }
+
+@media (max-width: 700px) {
+  #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  aside { max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); }
+}

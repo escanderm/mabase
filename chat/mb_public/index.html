@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Чат на MaBase</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- вход -->
+  <section id="login" hidden>
+    <form id="login-form" class="card">
+      <h1>Чат на MaBase</h1>
+      <label>Email <input name="email" type="email" required autocomplete="username"></label>
+      <label>Пароль <input name="password" type="password" required minlength="8" autocomplete="current-password"></label>
+      <label class="register-only">Имя <input name="name" maxlength="40" autocomplete="nickname"></label>
+      <div class="row">
+        <button name="mode" value="login">Войти</button>
+        <button name="mode" value="register" class="secondary">Зарегистрироваться</button>
+      </div>
+      <p class="hint">Тестовые: alice@example.test / dev-alice-1, bob@example.test / dev-bob-1, carol@example.test / dev-carol-1 (после <code>mabase seed</code>)</p>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
+
+  <!-- чат -->
+  <section id="app" hidden>
+    <aside>
+      <header>
+        <b id="me"></b>
+        <span id="conn" class="conn"></span>
+        <button id="logout" class="link">Выйти</button>
+      </header>
+
+      <h2>Комнаты</h2>
+      <ul id="rooms" class="list"></ul>
+      <form id="new-room" class="row">
+        <input name="name" placeholder="Новая комната" maxlength="80" required>
+        <button>+</button>
+      </form>
+
+      <h2>Приглашения</h2>
+      <ul id="invites" class="list"><li class="empty">нет</li></ul>
+
+      <h2>В сети</h2>
+      <ul id="online" class="list"></ul>
+    </aside>
+
+    <main>
+      <div id="no-room" class="placeholder">Выберите комнату слева</div>
+      <div id="room" hidden>
+        <header>
+          <h1 id="room-name"></h1>
+          <span id="room-people"></span>
+          <span class="spacer"></span>
+          <form id="invite-form" class="row owner-only">
+            <input name="email" type="email" placeholder="email участника" required>
+            <button>Пригласить</button>
+          </form>
+          <button id="leave" class="secondary not-owner">Выйти из комнаты</button>
+          <button id="delete-room" class="danger owner-only">Удалить</button>
+        </header>
+        <div id="messages">
+          <button id="more" class="link">Загрузить ещё</button>
+          <ul id="message-list"></ul>
+        </div>
+        <div id="typing" class="hint"></div>
+        <form id="send" class="row">
+          <input name="text" placeholder="Сообщение" maxlength="4000" autocomplete="off" required>
+          <button>Отправить</button>
+        </form>
+      </div>
+    </main>
+  </section>
+
+  <div id="toast"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

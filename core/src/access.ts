@@ -92,14 +92,22 @@ export function checkClientRegex(pattern: string, maxLength: number): void {
   if (unbounded > 2) throw bad('$regex: больше двух повторов * или + в одном выражении')
 }
 
+export type AccessOptions = {
+  // mabase serve --dev: правило list/view читает коллекцию не из dependsOn -
+  // предупредить. Иначе подписки не узнают, что доступ изменился (design.md §11).
+  onRuleWarning?: (message: string) => void
+}
+
 export class Access {
   private defs = new Map<string, Resolved>()
+  private warned = new Set<string>()
   readonly limits: ClientLimits
 
   constructor(
     readonly db: Db,
     defs: Record<string, AccessDef>,
     limits: Partial<ClientLimits> = {},
+    readonly opts: AccessOptions = {},
   ) {
     this.limits = { ...DEFAULT_LIMITS, ...limits }
     for (const [name, def] of Object.entries({ users: {}, ...defs })) this.defs.set(name, this.resolve(name, def))
@@ -139,6 +147,28 @@ export class Access {
     return new ClientSession(this, user ? Object.freeze({ ...user }) : null)
   }
 
+  // Коллекции, которые правило прочитает через этот db, - на проверку dependsOn.
+  /** @internal */ watch(c: string, kind: string, db: Collections): Collections {
+    const warn = this.opts.onRuleWarning
+    if (!warn) return db
+    const deps = new Set(this._def(c).rules.dependsOn ?? [])
+    return new Proxy(db, {
+      get: (target, name) => {
+        if (typeof name === 'string' && name !== c && !deps.has(name)) {
+          const key = `${c}.${kind}:${name}`
+          if (!this.warned.has(key)) {
+            this.warned.add(key)
+            warn(
+              `Правило ${c}.${kind} читает коллекцию ${name}, а в dependsOn её нет. ` +
+                `Подписки на ${c} не узнают, что доступ изменился из-за ${name}: добавьте dependsOn: ['${name}']`,
+            )
+          }
+        }
+        return (target as any)[name]
+      },
+    })
+  }
+
   _def(c: string): Resolved {
     return this.defs.get(c) ?? this.resolve(c, {}) // нет описания - нет правил - доступа нет
   }
@@ -166,7 +196,7 @@ export class ClientSession {
     const compute = async () => {
       const rule = this.access._def(c).rules[kind]
       if (!rule) throw this.deny()
-      const r = await rule(this.user, { db: db ?? this.access.db.c })
+      const r = await rule(this.user, { db: this.access.watch(c, kind, db ?? this.access.db.c) })
       if (r === false || r === null || r === undefined) throw this.deny()
       if (r === true) return {}
       validateQuery(r)

@@ -1,5 +1,5 @@
 // Доступ клиента (design.md §11): правила-фильтры, виды полей, лимиты фильтров.
-// Правила - из examples/chat/mabase.config.ts.
+// Правила - из chat/mabase.config.ts.
 import { describe, expect, test } from 'bun:test'
 import { Access, checkClientRegex, type AccessDef } from '../src/access'
 import { Actions, defineAction, toClientError } from '../src/actions'
@@ -48,7 +48,7 @@ async function setup(limits = {}) {
   db.collection('rooms', { indexes: ['participants', 'ownerId'] })
   db.collection('messages', {
     indexes: ['roomId'],
-    // как в examples/chat: автора ставит хук по тому, кто пишет; сервер (сид) задаёт сам
+    // как в chat/: автора ставит хук по тому, кто пишет; сервер (сид) задаёт сам
     hooks: { beforeCreate: ({ doc, user }) => ({ ...doc, authorId: user?.id ?? (doc as any).authorId, ip: '10.0.0.1' }) },
   })
   await db.c.rooms!.insertMany([
@@ -249,6 +249,35 @@ describe('фильтры от клиента', () => {
     expect(await err(b.messages!.count({ text: { $regex: '^m1' } }))).toMatchObject({ status: 400 })
     // серверный код лимитов не имеет
     expect(await db.c.messages!.count({ text: 'нет такого' })).toBe(0)
+    await db.close()
+  })
+})
+
+describe('--dev', () => {
+  test('113. правило читает коллекцию не из dependsOn - предупреждение, один раз', async () => {
+    const db = await openDb({ dir: tmpDir('dev'), fsync: false })
+    db.collection('rooms', { indexes: ['participants'] })
+    db.collection('messages', { indexes: ['roomId'] })
+    const warnings: string[] = []
+    const defs: Record<string, AccessDef> = {
+      // как было в примере-чате до шага 8: dependsOn забыли
+      messages: { rules: { list: async (u, { db }) => (u ? { roomId: { $in: await roomIdsOf(db, u.id) } } : false) } },
+      rooms: { rules: { dependsOn: [], list: async (u, { db }) => (u ? { participants: u.id, x: (await db.rooms!.count()) >= 0 } : false) } },
+      ok: { rules: { dependsOn: ['rooms'], list: async (u, { db }) => (u ? { roomId: { $in: await roomIdsOf(db, u.id) } } : false) } },
+    }
+    const access = new Access(db, defs, {}, { onRuleWarning: (m) => void warnings.push(m) })
+    for (let i = 0; i < 3; i++) {
+      await access.forUser(alice).c.messages!.find({})
+      await access.forUser(alice).c.rooms!.find({})
+      await access.forUser(alice).c.ok!.find({})
+    }
+    expect(warnings).toHaveLength(1) // одно на правило и коллекцию; своя коллекция и dependsOn - без предупреждения
+    expect(warnings[0]).toContain("Правило messages.list читает коллекцию rooms")
+    expect(warnings[0]).toContain("dependsOn: ['rooms']")
+    // без --dev - ни предупреждений, ни обёртки
+    const plain = new Access(db, defs)
+    await plain.forUser(alice).c.messages!.find({})
+    expect(warnings).toHaveLength(1)
     await db.close()
   })
 })

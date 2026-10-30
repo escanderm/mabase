@@ -87,9 +87,9 @@ export async function createRoom(name: string) {
   openRoom(room._id)
 }
 
-export async function inviteUser(roomId: string, userId: string) {
+export async function inviteUser(roomId: string, email: string) {
   try {
-    await mb.action('invite', { roomId, userId })
+    await mb.action('invite', { roomId, email })
   } catch (err) {
     if (err instanceof MabaseError && err.code === 'conflict') return showError('Уже в комнате')
     throw err

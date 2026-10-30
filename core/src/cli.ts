@@ -1,6 +1,6 @@
 // CLI MaBase (design.md §5, §15, §17):
 //
-//   mabase serve  [--port 8090] [--host 0.0.0.0] [--dir mb_data] [--public mb_public]
+//   mabase serve  [--port 8090] [--host 0.0.0.0] [--dir mb_data] [--public mb_public] [--dev]
 //   mabase seed   [--dir mb_data]
 //   mabase backup <папка> [--dir mb_data]
 //   mabase import <коллекция> <файл.ndjson> [--dir mb_data]
@@ -18,7 +18,7 @@ import { importNdjson } from './import'
 import { formatTail } from './tail'
 import { openApp, readAdminInfo, startServer, type CollectionConfig, type ServerConfig } from './server'
 
-export const VERSION = '0.0.1'
+export const VERSION = '0.1.0'
 
 let pluginReady = false
 function registerModule(): void {
@@ -32,14 +32,16 @@ function registerModule(): void {
   })
 }
 
-export type Flags = { dir: string; port: number; host?: string; public?: string; root: string }
+export type Flags = { dir: string; port: number; host?: string; public?: string; root: string; dev: boolean }
 
 export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags } {
   const args: string[] = []
   const raw: Record<string, string> = {}
+  let dev = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!
-    if (a.startsWith('--')) {
+    if (a === '--dev') dev = true
+    else if (a.startsWith('--')) {
       const [k, v] = a.slice(2).split('=', 2) as [string, string | undefined]
       if (!['dir', 'port', 'host', 'public', 'root'].includes(k)) throw new UsageError(`неизвестный флаг --${k}`)
       const value = v ?? argv[++i]
@@ -53,7 +55,7 @@ export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags:
   return {
     cmd: args.shift() ?? 'help',
     args,
-    flags: { root, dir: resolve(root, raw.dir ?? 'mb_data'), port, host: raw.host, public: raw.public && resolve(root, raw.public) },
+    flags: { root, dir: resolve(root, raw.dir ?? 'mb_data'), port, host: raw.host, public: raw.public && resolve(root, raw.public), dev },
   }
 }
 
@@ -90,6 +92,7 @@ export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): 
     mail: appCfg.mail,
     limits: appCfg.limits,
     db: appCfg.db,
+    dev: flags.dev,
     realtime: appCfg.realtime,
     events: appCfg.events,
     handlers: api.eventHandlers,
@@ -125,6 +128,7 @@ export async function run(argv: string[], out: (line: string) => void = console.
       const events = [...api.eventHandlers().keys()]
       out(`MaBase ${VERSION}: ${s.url}`)
       out(`  данные: ${flags.dir}`)
+      if (flags.dev) out('  режим разработки: правила проверяются на dependsOn')
       if (hooks.length) out(`  хуки: ${hooks.join(', ')}`)
       if (events.length) out(`  обработчики событий: ${events.join(', ')}`)
       if (s.realtime) out(`  realtime: ${s.url.replace('http', 'ws')}/api/realtime`)
@@ -223,7 +227,8 @@ function lockedHint(err: unknown): never {
 
 const HELP = `MaBase ${VERSION}
 
-  mabase serve  [--port 8090] [--host 0.0.0.0] [--dir mb_data] [--public mb_public]
+  mabase serve  [--port 8090] [--host 0.0.0.0] [--dir mb_data] [--public mb_public] [--dev]
+                --dev - предупреждать, если правило читает коллекцию не из dependsOn
   mabase seed   - выполнить seed.ts (сервер должен быть остановлен)
   mabase backup <папка>
   mabase import <коллекция> <файл.ndjson>

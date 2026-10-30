@@ -1,8 +1,13 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Db } from '../src/db'
 
 const ROOT = join(import.meta.dir, '..', '.tmp')
+
+// Папки тестов прошлых запусков - убрать: копились гигабайтами, а Bun
+// зависает на старте, если текущая папка лежит внутри такой свалки.
+// bun test грузит helpers один раз на весь прогон - чистится только при старте.
+rmSync(ROOT, { recursive: true, force: true })
 
 export function tmpDir(prefix = 't'): string {
   mkdirSync(ROOT, { recursive: true })
