@@ -1,0 +1,38 @@
+# Тег vX.Y.Z -> тесты, сборки под 4 платформы, релиз на GitHub.
+# Архивы и checksums.txt отсюда скачивает mabase update.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # macOS: сборки под macOS нужно переподписать (core/build.ts)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - run: bun install --frozen-lockfile
+      - run: bun test --timeout 180000
+      - run: bun run release
+      - name: Проверить сборки
+        run: |
+          test "$(dist/release/darwin-arm64/mabase version)" = "${GITHUB_REF_NAME#v}"
+          tar -tzf dist/release/mabase-linux-x64.tar.gz
+          cd dist/release && shasum -a 256 -c checksums.txt
+      - name: Релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          awk -v v="## ${GITHUB_REF_NAME#v}" '$0 ~ "^## " { p = index($0, v) == 1; next } p' ../CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "MaBase $GITHUB_REF_NAME" --notes-file notes.md \
+            dist/release/*.tar.gz dist/release/checksums.txt

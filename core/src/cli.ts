@@ -5,17 +5,19 @@
 //   mabase backup <папка> [--dir mb_data]
 //   mabase import <коллекция> <файл.ndjson> [--dir mb_data]
 //   mabase tail   [--dir mb_data]
+//   mabase update [--check]
 //
 // Проект - текущая папка: mabase.config.ts, mb_hooks/*.ts, seed.ts. Они
 // импортируют 'mabase' - это виртуальный модуль из бинарника, node_modules не нужен.
 import { plugin } from 'bun'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import * as api from './api'
 import { openDb } from './db'
 import { LockedError } from './errors'
 import { importNdjson } from './import'
 import { formatTail } from './tail'
+import { DEFAULT_API, update } from './update'
 import { openApp, readAdminInfo, startServer, type CollectionConfig, type ServerConfig } from './server'
 
 export const VERSION = '0.1.0'
@@ -32,15 +34,17 @@ function registerModule(): void {
   })
 }
 
-export type Flags = { dir: string; port: number; host?: string; public?: string; root: string; dev: boolean }
+export type Flags = { dir: string; port: number; host?: string; public?: string; root: string; dev: boolean; check: boolean }
 
 export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags } {
   const args: string[] = []
   const raw: Record<string, string> = {}
   let dev = false
+  let check = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!
     if (a === '--dev') dev = true
+    else if (a === '--check') check = true
     else if (a.startsWith('--')) {
       const [k, v] = a.slice(2).split('=', 2) as [string, string | undefined]
       if (!['dir', 'port', 'host', 'public', 'root'].includes(k)) throw new UsageError(`неизвестный флаг --${k}`)
@@ -55,7 +59,7 @@ export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags:
   return {
     cmd: args.shift() ?? 'help',
     args,
-    flags: { root, dir: resolve(root, raw.dir ?? 'mb_data'), port, host: raw.host, public: raw.public && resolve(root, raw.public), dev },
+    flags: { root, dir: resolve(root, raw.dir ?? 'mb_data'), port, host: raw.host, public: raw.public && resolve(root, raw.public), dev, check },
   }
 }
 
@@ -214,6 +218,13 @@ export async function run(argv: string[], out: (line: string) => void = console.
     case 'version':
       out(VERSION)
       return
+    case 'update': {
+      // Из исходников обновлять нечего: process.execPath - это сам bun
+      if (!import.meta.url.includes('$bunfs')) throw new UsageError('update работает только в собранном бинарнике')
+      const r = await update({ current: VERSION, exe: realpathSync(process.execPath), api: process.env.MABASE_UPDATE_URL || DEFAULT_API, check: flags.check, out })
+      if (r.updated && readAdminInfo(flags.dir)) out('Сервер запущен на старой версии - перезапустите его')
+      return
+    }
     case 'help':
       out(HELP)
       return
@@ -234,6 +245,7 @@ const HELP = `MaBase ${VERSION}
   mabase backup <папка>
   mabase import <коллекция> <файл.ndjson>
   mabase tail   - живой журнал работающего сервера: коммиты, действия, события, ошибки
+  mabase update  [--check] - скачать новую версию с GitHub и заменить этот файл
   mabase version`
 
 if (import.meta.main) {

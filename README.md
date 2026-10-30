@@ -1,8 +1,10 @@
 # MaBase
 
+[![tests](https://github.com/escanderm/mabase/actions/workflows/ci.yml/badge.svg)](https://github.com/escanderm/mabase/actions/workflows/ci.yml)
+
 > **v0.1.** Ядро, правила, вход, HTTP, WebSocket и SDK работают; рабочий
-> пример - чат в [`chat/`](chat). Готовых сборок для скачивания пока нет:
-> бинарник собирается командой `cd core && bun run build`.
+> пример - чат в [`chat/`](chat). Сборки под macOS и Linux - в
+> [релизах](https://github.com/escanderm/mabase/releases).
 
 Бэкенд для своих проектов в одном файле. Документы с Mongo-запросами,
 действия и хуки на TypeScript, правила доступа, вход по паролю или телефону
@@ -44,13 +46,30 @@ await mb.action('clearNotes')                           // атомарно, о�
 ## Попробовать за минуту
 
 ```bash
-curl -L https://github.com/<owner>/mabase/releases/latest/download/mabase-macos-arm64 -o mabase
-chmod +x mabase
+curl -L https://github.com/escanderm/mabase/releases/latest/download/mabase-darwin-arm64.tar.gz | tar -xz
 ./mabase serve
 ```
 
+Вместо `darwin-arm64` (Mac на Apple Silicon) - своя платформа: `darwin-x64`
+(Mac на Intel), `linux-x64`, `linux-arm64`. Linux-сборки проверены на Ubuntu
+22.04; нужна glibc, Alpine (musl) не подойдёт. Суммы sha256 - в `checksums.txt` того же релиза.
+
 Ни Node, ни Bun ставить не нужно: всё внутри одного файла. Рядом появится
 `mb_data/` с базой.
+
+На macOS архив, скачанный браузером, система помечает карантином и не даёт
+запустить бинарник. Через `curl` такого нет; если скачали браузером:
+`xattr -d com.apple.quarantine mabase`.
+
+Новая версия: `./mabase update` - скачает последний релиз, сверит sha256,
+проверит, что новый файл запускается, и только потом заменит старый. Данные
+не трогает. `./mabase update --check` - только узнать, есть ли новая.
+
+Собрать самому (нужен [Bun](https://bun.sh) 1.3.12):
+
+```bash
+cd core && bun install && bun run build   # -> core/dist/mabase
+```
 
 Структура проекта:
 
@@ -63,7 +82,6 @@ my-project/
   mb_data/             # создаётся сам
     db/                # база - не трогать руками
     secret.key         # секрет токенов (или MABASE_SECRET) - берегите
-    types.d.ts         # типы для редактора
 ```
 
 ## Главное за пять минут
@@ -162,8 +180,9 @@ emit('invite.email', { inviteId }, { after: '0s', key: `invite:${inviteId}` })
   Масштабирования и репликации нет и не будет.
 - **Запись** - около 1700 транзакций в секунду с fsync, пачками - около
   80 тыс. документов в секунду. Хватает для своих проектов с запасом.
-- **Файлы** хранятся на диске рядом с базой, не в памяти.
+- **Файлов** (загрузок) пока нет. Будут храниться на диске рядом с базой, не в памяти.
 - **Админки** в первой версии нет: сиды и REST-клиент.
+- **Windows** не поддерживается: проверялось только на macOS и Linux.
 
 ## Надёжность
 
@@ -173,9 +192,15 @@ emit('invite.email', { inviteId }, { after: '0s', key: `invite:${inviteId}` })
   половину транзакции. Проверено тестами с `kill -9`.
 - Если файлы базы выглядят странно (нет `CURRENT`, устаревший `CURRENT`),
   MaBase **отказывается стартовать и ничего не удаляет**.
-- Бэкап: `./mabase backup <папка>` - работает и на запущенном сервере
-  (команда ещё не спроектирована).
+- Бэкап: `./mabase backup <папка>` - работает и на запущенном сервере.
+
+## Что внутри репозитория
+
+- [`core/`](core) - сам MaBase: исходники, тесты, сборка.
+- [`chat/`](chat) - рабочий пример: чат с комнатами, приглашениями и "печатает...".
+- [`design.md`](design.md) - все решения и почему они такие.
+- [`CHANGELOG.md`](CHANGELOG.md) - что нового в версиях.
 
 ## Лицензия
 
-MIT.
+[MIT](LICENSE).
