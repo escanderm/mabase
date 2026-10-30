@@ -2,7 +2,7 @@
 // объекты < булевы. Один и тот же порядок у индекса и у сортировки в памяти,
 // иначе ответ зависел бы от того, нашёлся ли индекс.
 import { QueryError } from './errors'
-import { pathValues, type Doc } from './query'
+import { pathValues, type Doc } from './paths'
 
 export type Dir = 1 | -1
 export type SortSpec = Array<[path: string, dir: Dir]>

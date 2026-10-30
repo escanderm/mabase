@@ -3,6 +3,7 @@
 // sift умеет $where и выполняет строку как код.
 import sift from 'sift'
 import { QueryError } from './errors'
+import { getPath, pathValues } from './paths'
 
 export type Doc = Record<string, any> & { _id: string }
 export type Query = Record<string, unknown>
@@ -25,46 +26,9 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
 const isScalar = (v: unknown) => v === null || ['string', 'number', 'boolean'].includes(typeof v)
 
 // ---------- пути ----------
+// В paths.ts - без зависимостей: тот же порядок нужен SDK в браузере.
 
-export function getPath(doc: unknown, path: string): unknown {
-  let cur: any = doc
-  for (const part of path.split('.')) {
-    if (cur == null || typeof cur !== 'object') return undefined
-    cur = cur[part]
-  }
-  return cur
-}
-
-// Все значения по пути, как их видит sift: массивы раскрываются и в середине
-// пути, и в конце, вложенные массивы - тоже (Mongo вложенные не раскрывает,
-// sift раскрывает; важнее, чтобы индекс и матчер совпадали). Нет значения -
-// [undefined]. Отсюда берутся ключи индекса и ключ сортировки, поэтому индекс
-// и полный перебор видят одно и то же.
-export function pathValues(doc: unknown, parts: readonly string[]): unknown[] {
-  const out: unknown[] = []
-  const leaf = (v: unknown) => {
-    if (Array.isArray(v)) for (const x of v) leaf(x)
-    else out.push(v)
-  }
-  const walk = (v: unknown, i: number) => {
-    if (i === parts.length) {
-      leaf(v)
-      return
-    }
-    if (Array.isArray(v)) {
-      for (const el of v) walk(el, i)
-      return
-    }
-    if (v === null || typeof v !== 'object') {
-      out.push(undefined)
-      return
-    }
-    walk((v as any)[parts[i]!], i + 1)
-  }
-  walk(doc, 0)
-  if (out.length === 0) out.push(undefined) // пустой массив - как отсутствующее поле
-  return out
-}
+export { getPath, pathValues } from './paths'
 
 function setPath(doc: any, path: string, value: unknown): void {
   const parts = path.split('.')

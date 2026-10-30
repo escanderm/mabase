@@ -2,9 +2,9 @@
 // Главная идея: live() = запрос + подписка + перечитывание при реконнекте.
 // SDK делает это сам (design.md §12, "Реконнект"), приложение видит только список.
 import { createClient, MabaseError } from 'mabase/client'
-import type config from '../mabase.config' // типы из zod-схем, без генерации [позже]
+// Типы из zod-схем конфига без генерации - [позже]: createClient<typeof config>(...)
 
-const mb = createClient<typeof config>('https://chat.example.test')
+const mb = createClient('https://chat.example.test')
 
 // ---------- вход ----------
 // Токены SDK хранит и обновляет сам. После перезагрузки страницы - restore().
@@ -44,7 +44,8 @@ function start() {
 export function openRoom(roomId: string) {
   // Последние 50 сообщений + новые в реальном времени.
   // sort + limit доходят до индекса по roomId (design.md §8).
-  const feed = mb.live('messages', { roomId }, { sort: { _id: -1 }, limit: 50 })
+  // parent: после reset SDK проверит, видна ли ещё комната; нет - revoked.
+  const feed = mb.live('messages', { roomId }, { sort: { _id: -1 }, limit: 50, parent: ['rooms', roomId] })
   feed.subscribe((list) => renderMessages([...list].reverse()))
 
   // Прокрутка вверх: ещё 50 старых. Курсор { _id: { $lt: самый старый } } SDK строит сам.
@@ -57,7 +58,7 @@ export function openRoom(roomId: string) {
   })
 
   // Кто печатает. Сервер сам добавляет from - клиенту верить нельзя.
-  const offTyping = mb.on('typing', ({ from, data }) => {
+  const offTyping = mb.on('typing', ({ from, data }: { from: string; data: { roomId: string } }) => {
     if (data.roomId === roomId && from !== mb.auth.user!.id) showTyping(from)
   })
 
