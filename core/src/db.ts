@@ -721,6 +721,30 @@ export class Db {
     return this.compacting
   }
 
+  // Целостный бэкап на один tx (design.md §6): компактирование под очередью
+  // записи, затем копия снапшота уже без очереди - база пишет дальше.
+  // Новое компактирование ждёт конца копии: оно удалило бы копируемый снапшот.
+  async backup(dest: string): Promise<{ tx: number; bytes: number }> {
+    if (this.als.getStore()) throw new Error('backup() нельзя вызывать внутри транзакции')
+    while (this.compacting) await this.compacting.catch(() => {})
+    let result!: { tx: number; bytes: number }
+    this.compacting = (async () => {
+      try {
+        const release = await this.queue.acquire()
+        try {
+          await this.disk.compact(this.lastTx, this.data)
+        } finally {
+          release()
+        }
+        result = { tx: this.disk.gen, bytes: await this.disk.copyGeneration(dest) }
+      } finally {
+        this.compacting = null
+      }
+    })()
+    await this.compacting
+    return result
+  }
+
   async close(): Promise<void> {
     if (this.compacting) await this.compacting
     const release = await this.queue.acquire()

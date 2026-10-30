@@ -424,6 +424,49 @@ export class Disk {
     return true
   }
 
+  // Копия текущего поколения в пустую папку: снапшот, пустой лог, CURRENT.
+  // Только сразу после компактирования, пока нового компактирования нет:
+  // лог пуст, снапшот не меняется - копировать можно без очереди записи.
+  async copyGeneration(dest: string): Promise<number> {
+    if (existsSync(dest) && readdirSync(dest).length) throw new Error(`бэкап: папка ${dest} не пустая`)
+    mkdirSync(dest, { recursive: true })
+    const n = this.gen
+    const snap = `snapshot.${n}.jsonl`
+    const src = await open(this.p(snap), 'r')
+    const out = await open(join(dest, snap + '.tmp'), 'w')
+    let bytes = 0
+    try {
+      const buf = Buffer.alloc(1 << 20)
+      while (true) {
+        const { bytesRead } = await src.read(buf, 0, buf.length, bytes)
+        if (!bytesRead) break
+        await writeAll(out, buf.subarray(0, bytesRead), bytes)
+        bytes += bytesRead
+      }
+      await out.sync()
+    } finally {
+      await src.close()
+      await out.close()
+    }
+    renameSync(join(dest, snap + '.tmp'), join(dest, snap))
+    for (const [name, text] of [[`log.${n}.jsonl`, logHeader(n)], ['CURRENT', `${n}\n`]] as const) {
+      const fd = openSync(join(dest, name), 'w')
+      try {
+        writeSync(fd, text)
+        fsyncSync(fd)
+      } finally {
+        closeSync(fd)
+      }
+    }
+    const dfd = openSync(dest, 'r')
+    try {
+      fsyncSync(dfd)
+    } finally {
+      closeSync(dfd)
+    }
+    return bytes
+  }
+
   async close(): Promise<void> {
     await this.fh?.close()
     this.fh = null

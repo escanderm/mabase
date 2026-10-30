@@ -62,6 +62,7 @@ my-project/
   seed.ts              # тестовые данные: ./mabase seed
   mb_data/             # создаётся сам
     db/                # база - не трогать руками
+    secret.key         # секрет токенов (или MABASE_SECRET) - берегите
     types.d.ts         # типы для редактора
 ```
 
