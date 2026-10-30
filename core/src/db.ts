@@ -23,14 +23,17 @@ import { ulid } from './ulid'
 export type { Doc, Query, Update } from './query'
 export type { Explain, FindOptions } from './planner'
 
-type BeforeCtx = { db: Db; signal: AbortSignal; depth: number }
+// Кто пишет: пользователь запроса или null (сервер, сид, системные задачи).
+export type User = { readonly id: string; readonly roles?: readonly string[] }
+
+type BeforeCtx = { db: Db; signal: AbortSignal; depth: number; user: User | null }
 export type Hooks = {
   beforeCreate?: (ctx: BeforeCtx & { doc: Doc }) => unknown
   beforeUpdate?: (ctx: BeforeCtx & { prev: Doc; next: Doc }) => unknown
   beforeDelete?: (ctx: BeforeCtx & { prev: Doc }) => unknown
-  afterCreate?: (ctx: { db: Db; doc: Doc }) => unknown
-  afterUpdate?: (ctx: { db: Db; prev: Doc; doc: Doc }) => unknown
-  afterDelete?: (ctx: { db: Db; prev: Doc }) => unknown
+  afterCreate?: (ctx: { db: Db; doc: Doc; user: User | null }) => unknown
+  afterUpdate?: (ctx: { db: Db; prev: Doc; doc: Doc; user: User | null }) => unknown
+  afterDelete?: (ctx: { db: Db; prev: Doc; user: User | null }) => unknown
 }
 export type CollectionDef = { schema?: Schema; indexes?: string[]; hooks?: Hooks }
 
@@ -60,6 +63,7 @@ class Tx {
   after: Array<{ collection: string; run: () => unknown }> = []
   events: TxEvent[] = []
   scheduled: Array<TxEvent & { runAt: number; key?: string }> = []
+  user: User | null = null
   abort = new AbortController()
   release: (() => void) | null = null
   acquiring: Promise<void> | null = null
@@ -73,6 +77,7 @@ type Store = { tx: Tx; depth: number }
 export type TxApi = {
   c: Record<string, CollectionApi>
   signal: AbortSignal
+  user: User | null
   // Без after - событие подписчикам после коммита. С after - задача в _scheduled
   // в той же строке лога (design.md §13); доставка - шаг 10.
   emit: (event: string, data?: unknown, opts?: EmitOptions) => void
@@ -109,7 +114,7 @@ function sortedIds(docs: Map<string, Doc>): string[] {
 }
 
 // Только нужные поля. _id - всегда.
-function project(doc: Doc, fields: string[] | undefined): Doc {
+export function project(doc: Doc, fields: string[] | undefined): Doc {
   if (!fields) return clone(doc)
   const out: any = { _id: doc._id }
   for (const f of fields) {
@@ -210,8 +215,8 @@ export class CollectionApi {
     return (await this.find(query, { ...opts, limit: 1 }))[0] ?? null
   }
 
-  count(query: Query = {}): Promise<number> {
-    return this.db._count(this.tx(), this.name, query)
+  count(query: Query = {}, opts: Pick<FindOptions, 'maxScanned'> = {}): Promise<number> {
+    return this.db._count(this.tx(), this.name, query, opts.maxScanned)
   }
 
   // Как выполнится запрос: источник кандидатов, сколько проверено, сортировалось ли в памяти.
@@ -311,7 +316,8 @@ export class Db {
 
   // ---------- транзакции ----------
 
-  transaction<T>(fn: (tx: TxApi) => T | Promise<T>): Promise<T> {
+  // user - кто пишет; доходит до хуков. Вложенная транзакция берёт его у внешней.
+  transaction<T>(fn: (tx: TxApi) => T | Promise<T>, opts: { user?: User | null } = {}): Promise<T> {
     const store = this.als.getStore()
     if (store) {
       // вложенная транзакция присоединяется к текущей
@@ -319,6 +325,7 @@ export class Db {
       return Promise.resolve().then(() => fn(this.txApi(store.tx)))
     }
     const tx = new Tx()
+    tx.user = opts.user ? Object.freeze({ ...opts.user }) : null
     return new Promise<T>((resolve, reject) => {
       tx.fail = reject
       this.als.run({ tx, depth: 0 }, () => {
@@ -342,6 +349,7 @@ export class Db {
         get: (_, name) => (typeof name === 'string' ? new CollectionApi(this, name, tx) : undefined),
       }),
       signal: tx.abort.signal,
+      user: tx.user,
       emit: (event, data = null, opts = {}) => {
         this.ensureOpen(tx)
         if (typeof event !== 'string' || event === '') throw new QueryError('emit: нужно имя события')
@@ -557,7 +565,7 @@ export class Db {
     if (hooks?.beforeCreate) {
       const h = hooks.beforeCreate
       const r = await this.runBefore(tx, depth, () =>
-        h({ doc: clone(doc), db: this, signal: tx.abort.signal, depth: depth + 1 }),
+        h({ doc: clone(doc), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user }),
       )
       if (r && typeof r === 'object') doc = { ...clone(r as object), _id: id, _createdAt: now, _updatedAt: now }
     }
@@ -567,7 +575,7 @@ export class Db {
     if (hooks?.afterCreate) {
       const h = hooks.afterCreate
       const saved = clone(doc)
-      tx.after.push({ collection: c, run: () => h({ doc: saved, db: this }) })
+      tx.after.push({ collection: c, run: () => h({ doc: saved, db: this, user: tx.user }) })
     }
     return clone(doc)
   }
@@ -584,7 +592,7 @@ export class Db {
     if (hooks?.beforeUpdate) {
       const h = hooks.beforeUpdate
       const r = await this.runBefore(tx, depth, () =>
-        h({ prev: clone(prev), next: clone(next), db: this, signal: tx.abort.signal, depth: depth + 1 }),
+        h({ prev: clone(prev), next: clone(next), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user }),
       )
       if (r && typeof r === 'object') {
         next = { ...clone(r as object), _id: id, _createdAt: prev._createdAt, _updatedAt: now }
@@ -597,7 +605,7 @@ export class Db {
       const h = hooks.afterUpdate
       const p = clone(prev)
       const d = clone(next)
-      tx.after.push({ collection: c, run: () => h({ prev: p, doc: d, db: this }) })
+      tx.after.push({ collection: c, run: () => h({ prev: p, doc: d, db: this, user: tx.user }) })
     }
     return clone(next)
   }
@@ -612,7 +620,7 @@ export class Db {
     if (hooks?.beforeDelete) {
       const h = hooks.beforeDelete
       await this.runBefore(tx, depth, () =>
-        h({ prev: clone(prev), db: this, signal: tx.abort.signal, depth: depth + 1 }),
+        h({ prev: clone(prev), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user }),
       )
     }
     this.ensureOpen(tx)
@@ -620,7 +628,7 @@ export class Db {
     if (hooks?.afterDelete) {
       const h = hooks.afterDelete
       const p = clone(prev)
-      tx.after.push({ collection: c, run: () => h({ prev: p, db: this }) })
+      tx.after.push({ collection: c, run: () => h({ prev: p, db: this, user: tx.user }) })
     }
   }
 
@@ -640,9 +648,9 @@ export class Db {
     return docs.map((d) => project(d, opts.fields))
   }
 
-  async _count(tx: Tx | null, c: string, query: Query): Promise<number> {
+  async _count(tx: Tx | null, c: string, query: Query, maxScanned?: number): Promise<number> {
     if (tx) await this.enter(tx)
-    return runFind(this.state(c), query, { unordered: true }, tx?.overlay.get(c)).docs.length
+    return runFind(this.state(c), query, { unordered: true, maxScanned }, tx?.overlay.get(c)).docs.length
   }
 
   async _explain(tx: Tx | null, c: string, query: Query, opts: FindOptions): Promise<Explain> {

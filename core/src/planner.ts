@@ -20,6 +20,9 @@ export type FindOptions = {
   sort?: Record<string, 1 | -1>
   limit?: number
   fields?: string[]
+  // Сколько документов можно проверить sift-ом. Больше - QueryError. Для
+  // запросов клиента: широкий запрос без индекса не вешает единственный процесс.
+  maxScanned?: number
 }
 
 export type Explain = {
@@ -214,6 +217,12 @@ export function runFind(
     if (ov?.has(id)) continue // версию из транзакции проверим ниже
     const doc = state.docs.get(id)!
     scanned++
+    if (opts.maxScanned !== undefined && scanned > opts.maxScanned) {
+      throw new QueryError(
+        `запрос проверил больше ${opts.maxScanned} документов: слишком широкий фильтр без индекса. ` +
+          'Добавьте индекс на поле фильтра или сузьте запрос',
+      )
+    }
     if (!match(doc)) continue
     out.push(doc)
     if (dir !== null && limit !== undefined && out.length >= limit) break

@@ -1,11 +1,11 @@
 // Действия (design.md §10): явная операция бизнес-логики, одна транзакция.
 // Слой над ядром: ядро про действия не знает.
 import type { z } from 'zod'
-import type { CollectionApi, Db, TxApi } from './db'
+import type { CollectionApi, Db, TxApi, User } from './db'
 import { ActionError, type ActionErrorCode } from './errors'
 import { assertJson } from './query'
 
-export type User = { readonly id: string; readonly roles?: readonly string[] }
+export type { User } from './db'
 
 export type ActionCtx<I, U> = {
   input: I
@@ -124,13 +124,15 @@ export class Actions {
       throw new ActionError('bad_request', `У действия ${name} нет входных данных`)
     }
 
-    const frozenUser = user ? Object.freeze({ ...user }) : null
-    return this.db.transaction(async (tx) => {
-      const result = await def.handler({ input, user: frozenUser, db: tx.c, emit: tx.emit, signal: tx.signal })
-      // ответ уйдёт по HTTP или сокету: проверяем здесь, пока транзакцию можно отменить
-      assertJson(result)
-      return result === undefined ? null : JSON.parse(JSON.stringify(result))
-    })
+    return this.db.transaction(
+      async (tx) => {
+        const result = await def.handler({ input, user: tx.user, db: tx.c, emit: tx.emit, signal: tx.signal })
+        // ответ уйдёт по HTTP или сокету: проверяем здесь, пока транзакцию можно отменить
+        assertJson(result)
+        return result === undefined ? null : JSON.parse(JSON.stringify(result))
+      },
+      { user },
+    )
   }
 
   private report(info: ActionRunInfo): void {
