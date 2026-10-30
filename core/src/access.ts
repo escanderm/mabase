@@ -248,7 +248,7 @@ export class ClientSession {
 }
 
 // Ошибки ядра, вызванные запросом клиента, - 400/404, а не 500.
-async function clientErrors<T>(fn: () => Promise<T>): Promise<T> {
+export async function clientErrors<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn()
   } catch (err) {

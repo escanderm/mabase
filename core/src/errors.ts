@@ -92,6 +92,9 @@ export const ACTION_ERROR_STATUS = {
   forbidden: 403,
   not_found: 404,
   conflict: 409,
+  invalid_credentials: 401, // неверный пароль или код
+  too_many_requests: 429,
+  unavailable: 503, // внешний сервис (authphone.su) не ответил
 } as const
 export type ActionErrorCode = keyof typeof ACTION_ERROR_STATUS
 
