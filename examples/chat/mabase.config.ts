@@ -32,6 +32,7 @@ const users = defineCollection('users', {
   },
   rules: {
     // профиль видят те, с кем есть общая комната
+    dependsOn: ['rooms'],
     list: async (user, { db }) => (user ? { _id: { $in: await contactsOf(db, user.id) } } : false),
     view: async (user, { db }) => (user ? { _id: { $in: await contactsOf(db, user.id) } } : false),
     update: (user, { before }) => user?.id === before._id,
@@ -70,7 +71,8 @@ const messages = defineCollection('messages', {
     readonly: ['authorId', 'editedAt'],
   },
   rules: {
-    // правило зависит от другой коллекции (rooms) [Q4]
+    // правило зависит от другой коллекции (rooms): выгнали - подписка получит reset [Q4]
+    dependsOn: ['rooms'],
     list: async (user, { db }) => (user ? { roomId: { $in: await roomIdsOf(db, user.id) } } : false),
     view: async (user, { db }) => (user ? { roomId: { $in: await roomIdsOf(db, user.id) } } : false),
     create: async (user, { doc, db }) => !!user && (await roomIdsOf(db, user.id)).includes(doc.roomId),
@@ -105,6 +107,7 @@ const invites = defineCollection('invites', {
 // Правило: видны только те, с кем есть общая комната. [Q7]
 const presence = defineCollection('_presence', {
   rules: {
+    dependsOn: ['rooms'], // контакты меняются вместе с комнатами
     list: async (user, { db }) => (user ? { userId: { $in: await contactsOf(db, user.id) } } : false),
   },
 })
@@ -198,7 +201,9 @@ export default defineConfig({
     typing: {
       from: 'client',
       input: z.object({ roomId: z.string() }),
-      broadcast: async (viewer, data, { db }) => (await roomIdsOf(db, viewer.id)).includes(data.roomId), // [Q5]
+      // кто может слать: только участник комнаты; кому: участникам - один запрос на событие [Q5]
+      allow: async (user, data, { db }) => (await roomIdsOf(db, user.id)).includes(data.roomId),
+      to: async (data, { db }) => (await db.rooms.findOne({ _id: data.roomId }))?.participants ?? [],
     },
   },
 })

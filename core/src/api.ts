@@ -9,6 +9,8 @@ import { ActionError } from './errors'
 import type { HttpOptions } from './http'
 import type { MailMessage, Mailer, MailOptions } from './mail'
 import type { ClientLimits } from './access'
+import type { Handler } from './bus'
+import type { EventConfig } from './realtime'
 
 export { z, ActionError, defineAction }
 export type { ActionDef, MailMessage }
@@ -31,8 +33,8 @@ export type AppConfig = {
   http?: Omit<HttpOptions, 'access' | 'auth' | 'actions' | 'adminToken' | 'onError'>
   limits?: Partial<ClientLimits>
   db?: Pick<DbOptions, 'txTimeoutMs' | 'compactMinBytes' | 'bigTxOps' | 'maxDepth'>
-  realtime?: boolean // шаг 8
-  events?: Record<string, unknown> // шаг 8
+  realtime?: boolean // WebSocket /api/realtime
+  events?: Record<string, EventConfig> // что уходит в сокет (design.md §12)
 }
 
 const CONFIG_KEYS = new Set(['collections', 'actions', 'auth', 'mail', 'http', 'limits', 'db', 'realtime', 'events'])
@@ -56,10 +58,10 @@ export function defineSeed(seed: SeedDefinition['seed']): SeedDefinition {
 }
 
 // ---------- обработчики событий из mb_hooks ----------
-// Доставка: события из транзакций - шаг 8, отложенные - шаг 10. Пока
-// обработчики только регистрируются.
+// После коммита, вне транзакции: события из emit() и '<коллекция>.created |
+// updated | deleted' с { doc, prev }. Отложенные (emit с after) - шаг 10.
 
-export type EventHandler = (ctx: { event: string; data: any; db: Db; signal: AbortSignal }) => unknown
+export type EventHandler = Handler
 const handlers = new Map<string, EventHandler[]>()
 
 export function on(event: string, fn: EventHandler): void {

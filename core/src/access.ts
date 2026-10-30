@@ -259,7 +259,7 @@ export async function clientErrors<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const and = (a: Query, b: Query): Query =>
+export const and = (a: Query, b: Query): Query =>
   Object.keys(a).length === 0 ? b : Object.keys(b).length === 0 ? a : { $and: [a, b] }
 
 export class ClientCollection {
@@ -288,6 +288,20 @@ export class ClientCollection {
       const rule = await this.s.ruleFilter(this.name, 'list')
       const docs = await this.core.find(and(rule, filter), o)
       return docs.map((d) => this.s.strip(this.name, d, opts.fields))
+    })
+  }
+
+  // То же, что find, плюс tx, на котором прочитано: клиент применит из
+  // буфера подписки только события с большим tx (design.md §12, реконнект).
+  list(filter: unknown = {}, opts: FindOptions = {}): Promise<{ items: Doc[]; tx: number }> {
+    return clientErrors(async () => {
+      this.s.checkFilter(this.name, filter)
+      const o = this.opts(opts)
+      const rule = await this.s.ruleFilter(this.name, 'list')
+      // core.find без транзакции читает синхронно при вызове: tx и данные - одного момента
+      const tx = this.s.access.db.lastTx
+      const docs = await this.core.find(and(rule, filter), o)
+      return { items: docs.map((d) => this.s.strip(this.name, d, opts.fields)), tx }
     })
   }
 

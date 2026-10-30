@@ -16,6 +16,7 @@ import { USERS, type Auth } from './auth'
 import { importNdjson } from './import'
 import type { User } from './db'
 import { ActionError, ReadOnlyError, TxTimeoutError } from './errors'
+import type { Tail } from './tail'
 
 export type HttpOptions = {
   access: Access
@@ -27,6 +28,7 @@ export type HttpOptions = {
   maxBodyBytes?: number // 1 МБ
   maxImportBytes?: number // импорт через admin: 256 МБ
   adminToken?: string // /api/admin/*; нет - admin выключен
+  tail?: Tail // GET /api/admin/tail - поток для mabase tail
   publicDir?: string // статика; путь без расширения, которого нет, - index.html (SPA)
   onError?: (err: unknown, info: { method: string; path: string }) => void
 }
@@ -188,7 +190,7 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
           if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw bad('limit: целое число больше 0')
           const fields = q.get('fields')?.split(',').filter(Boolean)
           for (const k of q.keys()) if (!RESERVED_PARAMS.has(k)) throw bad(`неизвестный параметр ${k}`)
-          return json({ items: await coll.find(filter, { sort, limit, fields }) })
+          return json(await coll.list(filter, { sort, limit, fields }))
         }
         if (method === 'POST') return json(await coll.insert(await body()))
       }
@@ -298,8 +300,29 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
   async function admin(req: Request, parts: string[], meta: RequestMeta): Promise<Response> {
     const token = /^Bearer (\S+)$/.exec(req.headers.get('authorization') ?? '')?.[1]
     if (!isLoopback(meta.ip) || !token || !safeEqualStr(token, opts.adminToken!)) throw new HttpError(404, 'not_found', 'Нет такого адреса')
-    if (req.method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Только POST')
     const [cmd, arg] = parts
+    // Поток NDJSON: строка на запись журнала, пока CLI не отключится.
+    if (cmd === 'tail' && !arg && req.method === 'GET' && opts.tail) {
+      let off = () => {}
+      const enc = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        start(ctrl) {
+          ctrl.enqueue(enc.encode(JSON.stringify({ ts: Date.now(), kind: 'tail', status: 'подключено' }) + '\n'))
+          off = opts.tail!.listen((e) => {
+            try {
+              ctrl.enqueue(enc.encode(JSON.stringify(e) + '\n'))
+            } catch {
+              off()
+            }
+          })
+        },
+        cancel() {
+          off()
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' } })
+    }
+    if (req.method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Только POST')
     if (cmd === 'compact' && !arg) {
       await db.compact()
       return json({ tx: db.lastTx })

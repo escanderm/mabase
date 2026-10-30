@@ -40,7 +40,10 @@ export type CollectionDef = { schema?: Schema; indexes?: string[]; hooks?: Hooks
 // Событие из транзакции. Уходит подписчикам onCommit только после коммита.
 export type TxEvent = { event: string; data: unknown }
 // events-only транзакция (без записей) получает tx = последний сохранённый номер.
-export type CommitInfo = { tx: number; ops: LogOp[]; holdMs: number; events: readonly TxEvent[] }
+// changes - те же операции с прежней версией документа: подпискам нужно
+// знать, была ли запись видна до изменения (design.md §12).
+export type Change = { c: string; id: string; prev: Doc | null; doc: Doc | null }
+export type CommitInfo = { tx: number; ops: LogOp[]; holdMs: number; events: readonly TxEvent[]; changes: readonly Change[]; user: User | null }
 export type EmitOptions = { after?: number | string; key?: string }
 export type HookErrorInfo = { where: string; collection?: string }
 
@@ -455,7 +458,7 @@ export class Db {
       tx.state = 'committed'
       const holdMs = this.holdMs(tx)
       tx.release?.()
-      if (events.length) this.notify({ tx: this.lastTx, ops, holdMs, events })
+      if (events.length) this.notify({ tx: this.lastTx, ops, holdMs, events, changes: [], user: tx.user })
       return
     }
     if (this.readOnly) {
@@ -475,6 +478,10 @@ export class Db {
     }
     crashPoint('log.afterFsyncBeforeApply')
 
+    const changes: Change[] = ops.map((op) => {
+      const id = op.op === 'put' ? op.doc._id : op.id
+      return { c: op.c, id, prev: this.data.get(op.c)?.get(id) ?? null, doc: op.op === 'put' ? op.doc : null }
+    })
     // синхронно, без await: никто не увидит половину пакета
     this.applyOps(ops)
     this.lastTx = txNo
@@ -482,16 +489,17 @@ export class Db {
     const holdMs = this.holdMs(tx)
     tx.release()
 
-    this.notify({ tx: txNo, ops, holdMs, events })
+    this.notify({ tx: txNo, ops, holdMs, events, changes, user: tx.user })
     // after* - вне контекста завершённой транзакции (SPEC §5.6)
     if (tx.after.length) this.als.exit(() => setTimeout(() => this.runAfter(tx), 0))
     this.maybeCompact()
   }
 
+  // Вне контекста транзакции: слушатель может писать в базу новыми транзакциями.
   private notify(info: CommitInfo): void {
     for (const l of this.listeners) {
       try {
-        l(info)
+        this.als.exit(() => l(info))
       } catch (err) {
         this.opts.onError(err, { where: 'onCommit' })
       }

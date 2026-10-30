@@ -4,6 +4,7 @@
 //   mabase seed   [--dir mb_data]
 //   mabase backup <папка> [--dir mb_data]
 //   mabase import <коллекция> <файл.ndjson> [--dir mb_data]
+//   mabase tail   [--dir mb_data]
 //
 // Проект - текущая папка: mabase.config.ts, mb_hooks/*.ts, seed.ts. Они
 // импортируют 'mabase' - это виртуальный модуль из бинарника, node_modules не нужен.
@@ -14,6 +15,7 @@ import * as api from './api'
 import { openDb } from './db'
 import { LockedError } from './errors'
 import { importNdjson } from './import'
+import { formatTail } from './tail'
 import { openApp, readAdminInfo, startServer, type CollectionConfig, type ServerConfig } from './server'
 
 export const VERSION = '0.0.1'
@@ -88,6 +90,9 @@ export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): 
     mail: appCfg.mail,
     limits: appCfg.limits,
     db: appCfg.db,
+    realtime: appCfg.realtime,
+    events: appCfg.events,
+    handlers: api.eventHandlers,
     http: { ...appCfg.http, publicDir: flags.public ?? appCfg.http?.publicDir ?? (existsSync(defaultPublic) ? defaultPublic : undefined) },
   }
   let seed: api.SeedDefinition | undefined
@@ -121,7 +126,8 @@ export async function run(argv: string[], out: (line: string) => void = console.
       out(`MaBase ${VERSION}: ${s.url}`)
       out(`  данные: ${flags.dir}`)
       if (hooks.length) out(`  хуки: ${hooks.join(', ')}`)
-      if (events.length) out(`  обработчики событий: ${events.join(', ')} (доставка - шаги 8 и 10)`)
+      if (events.length) out(`  обработчики событий: ${events.join(', ')}`)
+      if (s.realtime) out(`  realtime: ${s.url.replace('http', 'ws')}/api/realtime`)
       const stop = async () => {
         await s.stop()
         process.exit(0)
@@ -183,6 +189,23 @@ export async function run(argv: string[], out: (line: string) => void = console.
       out(`Импорт в ${collection}: добавлено ${r.inserted}, пропущено ${r.skipped} (такой _id уже есть)`)
       return
     }
+    case 'tail': {
+      const info = readAdminInfo(flags.dir)
+      if (!info) throw new Error(`Сервер не запущен: нет ${join(flags.dir, 'admin.json')}`)
+      const res = await fetch(`${info.url}/api/admin/tail`, { headers: { Authorization: `Bearer ${info.token}` } })
+      if (!res.ok || !res.body) throw new Error(`сервер ответил ${res.status}`)
+      let buf = ''
+      for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+        buf += new TextDecoder().decode(chunk)
+        let i: number
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i)
+          buf = buf.slice(i + 1)
+          if (line) out(formatTail(JSON.parse(line)))
+        }
+      }
+      return
+    }
     case 'version':
       out(VERSION)
       return
@@ -204,6 +227,7 @@ const HELP = `MaBase ${VERSION}
   mabase seed   - выполнить seed.ts (сервер должен быть остановлен)
   mabase backup <папка>
   mabase import <коллекция> <файл.ndjson>
+  mabase tail   - живой журнал работающего сервера: коммиты, действия, события, ошибки
   mabase version`
 
 if (import.meta.main) {
