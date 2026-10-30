@@ -15,10 +15,12 @@ import { clientErrors, type Access } from './access'
 import { parseDuration, type CollectionDef, type Db, type Doc, type Hooks, type TxApi, type User } from './db'
 import { ActionError, DefinitionError } from './errors'
 import { Mailer, type LetterKind } from './mail'
+import { exchangeCode, OAUTH_PROVIDERS, type OAuthClient, type OAuthProfile, type OAuthProviderName } from './oauth'
 import type { Schema } from './schema'
 
 export const USERS = 'users'
 export const AUTH_TOKENS = '_authTokens'
+export const EXTERNAL_AUTHS = '_externalAuths' // { provider, providerId, userId }: вход через Google и GitHub
 
 const RESERVED = {
   email: z.string().optional(),
@@ -29,7 +31,7 @@ const RESERVED = {
 }
 export const RESERVED_USER_FIELDS = Object.keys(RESERVED)
 
-export type AuthProvider = 'password' | 'authphone'
+export type AuthProvider = 'password' | 'authphone' | OAuthProviderName
 
 export type AuthOptions = {
   secret: string // подпись JWT; из переменной окружения, не короче 32 символов
@@ -43,6 +45,8 @@ export type AuthOptions = {
   hashConcurrency?: number // одновременных хэшей argon2id; каждый берёт 64 МБ памяти
   loginLimit?: { attempts: number; windowMs: number } // на email или телефон вместе с IP
   authphone?: { url?: string; timeoutMs?: number }
+  oauth?: Partial<Record<OAuthProviderName, OAuthClient>> // ключи - из переменных окружения
+  oauthFields?: (profile: OAuthProfile) => Record<string, unknown> // поля нового пользователя; по умолчанию { name }
   mail?: Mailer // нет - режим разработки: письма в консоль
   appUrl?: string // фронтенд: ссылки в письмах ведут сюда
   mailIntervalMs?: number // одно письмо одного вида пользователю не чаще; по умолчанию минута
@@ -75,6 +79,22 @@ type TokenKind = keyof typeof LETTERS
 
 // Смена пароля закрывает сессии и делает недействительными ссылки сброса.
 const PASSWORD_BOUND = { $in: ['session', 'reset'] }
+
+const OAUTH_STATE_MS = 10 * 60_000 // пользователь у провайдера
+const OAUTH_CODE_MS = 60_000 // одноразовый код от колбэка до SDK
+const OAUTH_PENDING_MAX = 10_000
+
+const b64sha256 = (s: string) => createHash('sha256').update(s).digest('base64url')
+
+// Чем закончился вход через провайдера - уходит во фронтенд после #.
+class OAuthFail extends Error {
+  constructor(public code: 'invalid_state' | 'denied' | 'provider_error' | 'signup_closed' | 'email_taken' | 'already_linked' | 'server_error') {
+    super(code)
+  }
+}
+
+type OAuthState = { provider: OAuthProviderName; verifier: string; redirectUri: string; challenge: string; userId: string | null; returnTo: string; expiresAt: number }
+type OAuthCode = { userId: string; provider: OAuthProviderName; challenge: string; expiresAt: number }
 
 export function normalizeEmail(v: unknown): string {
   if (typeof v !== 'string') throw bad('email - строка')
@@ -193,6 +213,7 @@ function usersHooks(h: Hooks): Hooks {
     beforeDelete: async (ctx) => {
       await h.beforeDelete?.(ctx)
       await ctx.db.c[AUTH_TOKENS]!.removeMany({ userId: ctx.prev._id }) // сессии уходят вместе с пользователем
+      await ctx.db.c[EXTERNAL_AUTHS]!.removeMany({ userId: ctx.prev._id })
     },
   }
 }
@@ -235,6 +256,8 @@ export class Auth {
   private mailIntervalMs: number
   private onError: (err: unknown, where: string) => void
   private background = new Set<Promise<void>>()
+  private oauthStates = new Map<string, OAuthState>()
+  private oauthCodes = new Map<string, OAuthCode>() // ключ - sha256 кода
 
   constructor(
     readonly access: Access,
@@ -245,7 +268,13 @@ export class Auth {
     }
     this.db = access.db
     this.providers = new Set(opts.providers ?? ['password'])
-    for (const p of this.providers) if (p !== 'password' && p !== 'authphone') throw new TypeError(`auth.providers: неизвестный способ входа ${p}`)
+    for (const p of this.providers) {
+      if (p === 'password' || p === 'authphone') continue
+      if (!(p in OAUTH_PROVIDERS)) throw new TypeError(`auth.providers: неизвестный способ входа ${p}`)
+      const c = opts.oauth?.[p as OAuthProviderName]
+      if (!c?.clientId || !c?.clientSecret) throw new TypeError(`auth.oauth.${p}: нужны clientId и clientSecret`)
+      if (!opts.appUrl) throw new TypeError(`auth.appUrl: адрес фронтенда, куда вернуть пользователя после входа через ${p}`)
+    }
     this.signup = opts.signup ?? true
     this.accessMs = parseDuration(opts.accessTtl ?? '15m')
     this.refreshMs = parseDuration(opts.refreshTtl ?? '30d')
@@ -266,6 +295,7 @@ export class Auth {
     this.onError = opts.onError ?? ((err, where) => console.error(`[mabase] ошибка в ${where}`, err))
     this.db.collection(USERS, usersDef(opts.users ?? {}))
     this.db.collection(AUTH_TOKENS, { indexes: ['userId'] })
+    this.db.collection(EXTERNAL_AUTHS, { indexes: ['providerId', 'userId'] })
   }
 
   // ---------- для клиента: /api/auth/* ----------
@@ -504,6 +534,162 @@ export class Auth {
   // Дождаться писем, ушедших в фоне. Для тестов и остановки сервера.
   async settled(): Promise<void> {
     while (this.background.size) await Promise.allSettled([...this.background])
+  }
+
+  // ---------- вход через Google и GitHub ----------
+  //
+  // 1. oauthStart - адрес провайдера. Сервер создаёт state и свой PKCE-ключ
+  //    (в памяти, 10 минут). SDK присылает challenge = sha256 своего verifier.
+  // 2. oauthCallback - провайдер вернул браузер с code. Сервер сверяет state,
+  //    сам меняет code на токен (секрет и PKCE-ключ знает только он), читает
+  //    профиль и решает, кто это. Браузер уходит на appUrl с одноразовым
+  //    кодом после # - в логи сервера и в Referer он не попадает.
+  // 3. oauthExchange - SDK меняет код и свой verifier на токены. Код из
+  //    адреса без verifier бесполезен. Токены в адресной строке не бывают.
+
+  // user - вошедший пользователь: провайдер привяжется к нему.
+  // returnTo - путь на appUrl, куда вернуть пользователя.
+  oauthStart(provider: string, args: { redirectUri: string; challenge: unknown; returnTo?: unknown; user?: User | null }): { url: string } {
+    const p = this.oauthProvider(provider)
+    if (typeof args.challenge !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(args.challenge)) throw bad('challenge - sha256 в base64url')
+    const returnTo = args.returnTo ?? '/'
+    if (typeof returnTo !== 'string' || !/^\/(?![/\\])[^\s#]{0,511}$/.test(returnTo)) throw bad('returnTo - путь на appUrl, начиная с /')
+    const now = this.now()
+    for (const [k, v] of this.oauthStates) if (v.expiresAt <= now) this.oauthStates.delete(k)
+    if (this.oauthStates.size >= OAUTH_PENDING_MAX) throw new ActionError('too_many_requests', 'Слишком много начатых входов, попробуйте позже')
+    const state = randomBytes(32).toString('base64url')
+    const verifier = randomBytes(32).toString('base64url')
+    this.oauthStates.set(state, {
+      provider: p,
+      verifier,
+      redirectUri: args.redirectUri,
+      challenge: args.challenge,
+      userId: args.user?.id ?? null,
+      returnTo,
+      expiresAt: now + OAUTH_STATE_MS,
+    })
+    const d = OAUTH_PROVIDERS[p]
+    const q = new URLSearchParams({
+      response_type: 'code',
+      client_id: this.opts.oauth![p]!.clientId,
+      redirect_uri: args.redirectUri,
+      scope: d.scopes.join(' '),
+      state,
+      code_challenge: b64sha256(verifier),
+      code_challenge_method: 'S256',
+    })
+    return { url: `${d.authUrl}?${q}` }
+  }
+
+  // Ответ - куда отправить браузер: appUrl + returnTo + #mb_oauth=код или #mb_oauth_error=причина.
+  async oauthCallback(provider: string, q: { code?: unknown; state?: unknown; error?: unknown }): Promise<{ redirect: string }> {
+    const st = typeof q.state === 'string' ? this.oauthStates.get(q.state) : undefined
+    if (st) this.oauthStates.delete(q.state as string) // state одноразовый
+    const back = (hash: string) => ({ redirect: `${this.appUrl}${st?.returnTo ?? '/'}#${hash}` })
+    try {
+      if (!st || st.provider !== provider || st.expiresAt <= this.now()) throw new OAuthFail('invalid_state')
+      if (q.error !== undefined || typeof q.code !== 'string' || !q.code) throw new OAuthFail('denied')
+      const d = OAUTH_PROVIDERS[st.provider]
+      let profile: OAuthProfile
+      try {
+        const signal = AbortSignal.timeout(10_000)
+        const token = await exchangeCode(d, this.opts.oauth![st.provider]!, { code: q.code, redirectUri: st.redirectUri, verifier: st.verifier }, this.fetch, signal)
+        profile = await d.profile(token, this.fetch, signal)
+      } catch (err) {
+        this.onError(err, `oauth ${st.provider}`)
+        throw new OAuthFail('provider_error')
+      }
+      const userId = await this.oauthUser(st.provider, profile, st.userId)
+      const code = randomBytes(32).toString('base64url')
+      const now = this.now()
+      for (const [k, v] of this.oauthCodes) if (v.expiresAt <= now) this.oauthCodes.delete(k)
+      this.oauthCodes.set(sha256(code), { userId, provider: st.provider, challenge: st.challenge, expiresAt: now + OAUTH_CODE_MS })
+      return back(`mb_oauth=${code}`)
+    } catch (err) {
+      if (err instanceof OAuthFail) return back(`mb_oauth_error=${err.code}`)
+      this.onError(err, `oauth ${provider}`)
+      return back('mb_oauth_error=server_error')
+    }
+  }
+
+  async oauthExchange(input: { code: unknown; verifier: unknown }): Promise<Session> {
+    return clientErrors(async () => {
+      const key = typeof input.code === 'string' ? sha256(input.code) : ''
+      const c = this.oauthCodes.get(key)
+      this.oauthCodes.delete(key) // одноразовый, даже если verifier неверный
+      if (!c || c.expiresAt <= this.now()) throw bad('Код входа недействителен или устарел')
+      if (typeof input.verifier !== 'string' || !safeEqual(b64sha256(input.verifier), c.challenge)) throw bad('Код входа недействителен или устарел')
+      return this.db.transaction(async (tx) => {
+        const user = await tx.c[USERS]!.findOne({ _id: c.userId })
+        if (!user) throw expired()
+        await this.dropExpired(tx, user._id)
+        return this.startSession(tx, user, c.provider)
+      })
+    })
+  }
+
+  // Отвязать провайдера. Последний способ входа отвязать нельзя.
+  async oauthUnlink(user: User | null, provider: string): Promise<void> {
+    return clientErrors(async () => {
+      if (!user) throw new ActionError('unauthorized', 'Нужен вход')
+      await this.db.transaction(async (tx) => {
+        const doc = await tx.c[USERS]!.findOne({ _id: user.id })
+        if (!doc) throw expired()
+        const links = await tx.c[EXTERNAL_AUTHS]!.find({ userId: user.id })
+        const link = links.find((l) => l.provider === provider)
+        if (!link) throw new ActionError('not_found', `${provider} не привязан`)
+        if (!doc.passwordHash && !doc.phone && links.length === 1) throw bad('Это единственный способ входа: сначала задайте пароль или привяжите другой')
+        await tx.c[EXTERNAL_AUTHS]!.remove(link._id)
+      }, { user })
+    })
+  }
+
+  // Кто это. По порядку: уже привязан; привязать к вошедшему; подтверждённый
+  // у провайдера email есть у пользователя - привязать к нему (как в
+  // PocketBase); иначе - новый пользователь.
+  private async oauthUser(provider: OAuthProviderName, p: OAuthProfile, linkTo: string | null): Promise<string> {
+    let email: string | undefined
+    try {
+      email = p.email === undefined ? undefined : normalizeEmail(p.email)
+    } catch {}
+    const verified = !!email && p.emailVerified
+    return this.db.transaction(async (tx) => {
+      const users = tx.c[USERS]!
+      const ext = tx.c[EXTERNAL_AUTHS]!
+      const link = await ext.findOne({ providerId: p.id, provider })
+      if (linkTo) {
+        if (link && link.userId !== linkTo) throw new OAuthFail('already_linked')
+        if (!(await users.findOne({ _id: linkTo }, { fields: ['_id'] }))) throw new OAuthFail('invalid_state')
+        if (!link) await ext.insert({ provider, providerId: p.id, userId: linkTo })
+        return linkTo
+      }
+      if (link) return link.userId as string
+      const same = email ? await users.findOne({ email }) : null
+      if (same && verified) {
+        // Захват заранее: кто-то зарегистрировался паролем на чужой email и
+        // ждёт. Владелец адреса пришёл через провайдера - пароль чужака
+        // стирается, его сессии закрываются.
+        if (!same.verified) {
+          await users.update(same._id, { $set: { verified: true }, $unset: { passwordHash: '' } })
+          await tx.c[AUTH_TOKENS]!.removeMany({ userId: same._id, kind: PASSWORD_BOUND })
+        }
+        await ext.insert({ provider, providerId: p.id, userId: same._id })
+        return same._id
+      }
+      // Неподтверждённый email у провайдера не привязывает и не занимает чужой адрес.
+      if (same) throw new OAuthFail('email_taken')
+      if (!this.signup) throw new OAuthFail('signup_closed')
+      const fields: Record<string, unknown> = { ...(this.opts.oauthFields ?? ((x: OAuthProfile) => (x.name ? { name: x.name } : {})))(p) }
+      for (const f of [...RESERVED_USER_FIELDS, '_id', '_createdAt', '_updatedAt']) delete fields[f]
+      const user = await users.insert({ ...fields, ...(verified && { email }), verified, roles: [] })
+      await ext.insert({ provider, providerId: p.id, userId: user._id })
+      return user._id
+    })
+  }
+
+  private oauthProvider(name: string): OAuthProviderName {
+    if (!(name in OAUTH_PROVIDERS) || !this.providers.has(name as AuthProvider)) throw new ActionError('not_found', `Вход через ${name} выключен`)
+    return name as OAuthProviderName
   }
 
   // ---------- для сервера: сид, действия ----------
