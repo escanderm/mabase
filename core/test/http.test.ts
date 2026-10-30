@@ -296,8 +296,8 @@ describe('HTTP', () => {
     expect(await (await fetch(`${s1.url}/api/health`)).json()).toEqual({ ok: true })
     const reg = await (await fetch(`${s1.url}/api/auth/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(alice) })).json()
     expect(statSync(join(dataDir, 'secret.key')).mode & 0o777).toBe(0o600)
-    expect(statSync(join(dataDir, 'admin.token')).mode & 0o777).toBe(0o600)
-    const admin1 = readFileSync(join(dataDir, 'admin.token'), 'utf8').trim()
+    expect(statSync(join(dataDir, 'admin.json')).mode & 0o777).toBe(0o600)
+    const admin1 = JSON.parse(readFileSync(join(dataDir, 'admin.json'), 'utf8')).token
     expect(admin1).toBe(s1.adminToken)
     // admin с этой машины по токену из файла
     expect((await fetch(`${s1.url}/api/admin/compact`, { method: 'POST', headers: { Authorization: `Bearer ${admin1}` } })).status).toBe(200)

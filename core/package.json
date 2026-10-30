@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "test": "bun test --timeout 180000",
-    "bench": "bun bench/query.ts"
+    "bench": "bun bench/query.ts",
+    "build": "bun build.ts"
   },
   "dependencies": {
     "nodemailer": "10.1.0",

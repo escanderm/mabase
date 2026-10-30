@@ -79,7 +79,8 @@ const messages = defineCollection('messages', {
   },
   hooks: {
     // хуки - только мелочи: проставить автора и время правки
-    beforeCreate: ({ doc, user }) => ({ ...doc, authorId: user!.id }),
+    // user - кто пишет; null - сервер (сид, импорт): тогда автор уже в doc
+    beforeCreate: ({ doc, user }) => ({ ...doc, authorId: user?.id ?? doc.authorId }),
     beforeUpdate: ({ next }) => ({ ...next, editedAt: Date.now() }),
   },
 })

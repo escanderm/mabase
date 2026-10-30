@@ -13,7 +13,8 @@ import { extname, join, resolve, sep } from 'node:path'
 import { clientErrors, type Access } from './access'
 import { toClientError, type Actions } from './actions'
 import { USERS, type Auth } from './auth'
-import type { Doc, User } from './db'
+import { importNdjson } from './import'
+import type { User } from './db'
 import { ActionError, ReadOnlyError, TxTimeoutError } from './errors'
 
 export type HttpOptions = {
@@ -33,7 +34,6 @@ export type HttpOptions = {
 export type RequestMeta = { ip?: string }
 
 const RESERVED_PARAMS = new Set(['filter', 'sort', 'limit', 'fields', 'count'])
-const IMPORT_BATCH = 1000
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...headers } })
@@ -316,32 +316,7 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
     }
     // Импорт: NDJSON, пачками по 1000 в транзакции, мимо правил и лимитов.
     // Документ с _id, который уже есть, пропускается: повторный импорт безопасен.
-    if (cmd === 'import' && arg) {
-      const lines = (await readBody(req, maxImport)).split('\n').filter((l) => l.trim())
-      let inserted = 0
-      let skipped = 0
-      return clientErrors(async () => {
-        for (let i = 0; i < lines.length; i += IMPORT_BATCH) {
-          const docs = lines.slice(i, i + IMPORT_BATCH).map((l, j) => {
-            try {
-              return JSON.parse(l) as Doc
-            } catch {
-              throw bad(`строка ${i + j + 1}: не JSON`)
-            }
-          })
-          await db.transaction(async (tx) => {
-            for (const d of docs) {
-              if (typeof d._id === 'string' && (await tx.c[arg]!.findOne({ _id: d._id }, { fields: ['_id'] }))) skipped++
-              else {
-                await tx.c[arg]!.insert(d)
-                inserted++
-              }
-            }
-          })
-        }
-        return json({ inserted, skipped })
-      })
-    }
+    if (cmd === 'import' && arg) return json(await clientErrors(async () => importNdjson(db, arg, await readBody(req, maxImport))))
     throw new HttpError(404, 'not_found', 'Нет такого адреса')
   }
 
