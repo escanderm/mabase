@@ -9,3 +9,6 @@ mb_data/
 
 # тестовый npm-пакет прототипа 01 - нужен, чтобы повторить проверку
 !prototypes/01-binary-hooks/project/node_modules/
+
+# тестовые доступы к S3 (не коммитить)
+.s3-test.env
