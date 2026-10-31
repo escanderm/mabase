@@ -3,14 +3,14 @@
 import { describe, expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { assetName, compareVersions, tar, untarFile, update } from '../src/update'
+import { assetName, compareVersions, tar, untarFile, update, verifyEd25519 } from '../src/update'
 import { tmpDir } from './helpers'
 
 const PLATFORM = 'test-arch'
 const script = (version: string) => new TextEncoder().encode(`#!/bin/sh\necho ${version}\n`)
 const sha = (b: Uint8Array) => new Bun.CryptoHasher('sha256').update(b as unknown as Uint8Array<ArrayBuffer>).digest('hex')
 
-type Release = { tag: string; bin?: Uint8Array; sum?: string; noAsset?: boolean }
+type Release = { tag: string; bin?: Uint8Array; sum?: string; noAsset?: boolean; sums?: string; sig?: string | false }
 
 function fakeGitHub(rel: Release | null) {
   const archive = rel?.bin && Bun.gzipSync(tar([{ name: 'mabase', data: rel.bin, mode: 0o755 }, { name: 'LICENSE', data: new Uint8Array([77]), mode: 0o644 }]) as unknown as Uint8Array<ArrayBuffer>)
@@ -26,14 +26,34 @@ function fakeGitHub(rel: Release | null) {
         if (!rel) return Response.json({ message: 'Not Found' }, { status: 404 })
         const assets: Array<{ name: string; browser_download_url: string }> = rel.noAsset ? [] : [{ name, browser_download_url: `${server.url}dl/${name}` }]
         assets.push({ name: 'checksums.txt', browser_download_url: `${server.url}dl/checksums.txt` })
+        if (rel.sig !== false) assets.push({ name: 'checksums.txt.sig', browser_download_url: `${server.url}dl/checksums.txt.sig` })
         return Response.json({ tag_name: rel.tag, assets })
       }
       if (pathname === `/dl/${name}`) return new Response(archive)
-      if (pathname === '/dl/checksums.txt') return new Response(`${'0'.repeat(64)}  other.tar.gz\n${rel?.sum ?? sha(archive!)}  ${name}\n`)
+      if (pathname === '/dl/checksums.txt') return new Response(rel?.sums ?? sumsOf(rel, archive, name))
+      if (pathname === '/dl/checksums.txt.sig') return new Response(typeof rel?.sig === 'string' ? rel.sig : 'подписи нет')
       return new Response('нет', { status: 404 })
     },
   })
   return { api: `${server.url}repos/x`, stop: () => server.stop(true) }
+}
+
+const sumsOf = (rel: Release | null, archive: Uint8Array | undefined, name: string) => `${'0'.repeat(64)}  other.tar.gz\n${rel?.sum ?? sha(archive!)}  ${name}\n`
+
+// Подпись Ed25519 тестовым ключом: seed -> PKCS8 DER (как в scripts/sign-release.ts)
+function testKey(): { seed: string; pub: string } {
+  const { generateKeyPairSync } = require('node:crypto') as typeof import('node:crypto')
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+  return {
+    pub: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64'),
+    seed: privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32).toString('base64'),
+  }
+}
+
+function signWith(seed: string, data: string): string {
+  const { createPrivateKey, sign } = require('node:crypto') as typeof import('node:crypto')
+  const key = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(seed, 'base64')]), format: 'der', type: 'pkcs8' })
+  return sign(null, Buffer.from(data), key).toString('base64')
 }
 
 function exe(version = '0.1.0'): string {
@@ -72,12 +92,12 @@ describe('mabase update', () => {
     const out = (l: string) => lines.push(l)
     try {
       const file = exe('0.1.0')
-      const checked = await update({ current: '0.1.0', exe: file, api: gh.api, platform: PLATFORM, check: true, out })
+      const checked = await update({ current: '0.1.0', exe: file, api: gh.api, platform: PLATFORM, check: true, out, publicKey: '' })
       expect(checked).toEqual({ current: '0.1.0', latest: '0.2.0', updated: false })
       expect(run(file)).toBe('0.1.0')
       expect(lines.at(-1)).toContain('0.1.0 -> 0.2.0')
 
-      const r = await update({ current: '0.1.0', exe: file, api: gh.api, platform: PLATFORM, out })
+      const r = await update({ current: '0.1.0', exe: file, api: gh.api, platform: PLATFORM, out, publicKey: '' })
       expect(r.updated).toBe(true)
       expect(run(file)).toBe('0.2.0')
       expect(statSync(file).mode & 0o777).toBe(0o755)
@@ -85,7 +105,7 @@ describe('mabase update', () => {
 
       // уже свежая или даже новее релиза - ничего не делаем
       for (const current of ['0.2.0', '0.10.0']) {
-        const same = await update({ current, exe: file, api: gh.api, platform: PLATFORM, out })
+        const same = await update({ current, exe: file, api: gh.api, platform: PLATFORM, out, publicKey: '' })
         expect(same.updated).toBe(false)
         expect(lines.at(-1)).toBe(`У вас последняя версия: ${current}`)
       }
@@ -106,13 +126,61 @@ describe('mabase update', () => {
       const gh = fakeGitHub(rel)
       try {
         const file = exe('0.1.0')
-        await expect(update({ current: '0.1.0', exe: file, api: gh.api, platform: PLATFORM, out: () => {} })).rejects.toThrow(error)
+        await expect(update({ current: '0.1.0', exe: file, api: gh.api, platform: PLATFORM, out: () => {}, publicKey: '' })).rejects.toThrow(error)
         expect(run(file)).toBe('0.1.0')
         expect(readdirSync(join(file, '..'))).toEqual(['mabase'])
       } finally {
         gh.stop()
       }
     }
+  })
+
+  test('126. подпись релиза: верная - ставим, подменённые суммы и отсутствие .sig - отказ', async () => {
+    const keys = testKey()
+    const name = assetName(PLATFORM)
+    // честный релиз: суммы подписаны ключом
+    const bin = script('0.2.0')
+    const gh = fakeGitHub({ tag: 'v0.2.0', bin, sig: signWith(keys.seed, sumsOf({ tag: 'v0.2.0', bin }, Bun.gzipSync(tar([{ name: 'mabase', data: bin, mode: 0o755 }, { name: 'LICENSE', data: new Uint8Array([77]), mode: 0o644 }]) as unknown as Uint8Array<ArrayBuffer>), name)) })
+    try {
+      const file = exe('0.1.0')
+      const lines: string[] = []
+      const r = await update({ current: '0.1.0', exe: file, api: gh.api, platform: PLATFORM, out: (l) => lines.push(l), publicKey: keys.pub })
+      expect(r.updated).toBe(true)
+      expect(run(file)).toBe('0.2.0')
+      expect(lines).toContain('Подпись checksums.txt проверена')
+    } finally {
+      gh.stop()
+    }
+
+    // подмена: суммы изменены, подпись осталась от исходных
+    const archive = Bun.gzipSync(tar([{ name: 'mabase', data: bin, mode: 0o755 }, { name: 'LICENSE', data: new Uint8Array([77]), mode: 0o644 }]) as unknown as Uint8Array<ArrayBuffer>)
+    const original = sumsOf({ tag: 'v0.2.0', bin }, archive, name)
+    const tampered = original.replace(name, name) + `${'f'.repeat(64)}  evil.tar.gz\n`
+    for (const rel of [
+      { tag: 'v0.2.0', bin, sums: tampered, sig: signWith(keys.seed, original) } as Release, // суммы подменены
+      { tag: 'v0.2.0', bin, sums: original, sig: signWith(testKey().seed, original) } as Release, // чужой ключ
+      { tag: 'v0.2.0', bin, sig: false } as Release, // подписи нет
+    ]) {
+      const bad = fakeGitHub(rel)
+      try {
+        const file = exe('0.1.0')
+        await expect(update({ current: '0.1.0', exe: file, api: bad.api, platform: PLATFORM, out: () => {}, publicKey: keys.pub })).rejects.toThrow(/подпись|checksums\.txt\.sig/)
+        expect(run(file)).toBe('0.1.0')
+      } finally {
+        bad.stop()
+      }
+    }
+  }, 30_000)
+
+  test('127. verifyEd25519: свой ключ - да, чужие данные и мусор - нет', () => {
+    const keys = testKey()
+    const data = new TextEncoder().encode('checksums')
+    const sig = signWith(keys.seed, 'checksums')
+    expect(verifyEd25519(data, sig, keys.pub)).toBe(true)
+    expect(verifyEd25519(new TextEncoder().encode('checksums!'), sig, keys.pub)).toBe(false)
+    expect(verifyEd25519(data, sig, testKey().pub)).toBe(false)
+    expect(verifyEd25519(data, 'не base64', keys.pub)).toBe(false)
+    expect(verifyEd25519(data, sig, 'короткий')).toBe(false)
   })
 
   test('125. сравнение версий - по числам, а не строкам', () => {

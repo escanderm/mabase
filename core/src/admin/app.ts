@@ -1708,9 +1708,10 @@ function dropCollectionDialog(name: string, count: number): void {
 // ---------- настройки ----------
 
 type Settings = {
-  fixed: { auth: boolean; mail: boolean }
+  fixed: { auth: boolean; mail: boolean; storage: boolean }
   auth: any
   mail: any
+  storage?: { s3?: Record<string, any> }
   callbacks: { google: string; github: string }
   db: { systemFields: { name: string; type: string; about: string }[]; limits: Record<string, number>; dir: string }
 }
@@ -1818,8 +1819,56 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
   )
   if (mro) for (const el of mailForm.querySelectorAll('input, select')) (el as HTMLInputElement).disabled = true
 
+  // ----- файлы (S3) -----
+  const ST = s.storage?.s3 ?? {}
+  const sro = s.fixed.storage
+  const [s3Row, s3on] = check('Хранить файлы в S3', !!s.storage?.s3, 'AWS, MinIO, R2, Яндекс, Beget; иначе - локальная папка mb_data/files')
+  const s3box = h('div', { class: 'sub' })
+  const s3fields = {
+    bucket: h('input', { class: 'input mono', placeholder: 'my-files', value: ST.bucket ?? '' }) as HTMLInputElement,
+    region: h('input', { class: 'input mono', placeholder: 'ru1', value: ST.region ?? '' }) as HTMLInputElement,
+    accessKeyId: h('input', { class: 'input mono', value: ST.accessKeyId ?? '', autocomplete: 'off' }) as HTMLInputElement,
+    secretAccessKey: h('input', { class: 'input mono', type: 'password', placeholder: ST.secretAccessKey ? 'задан - оставьте пустым, чтобы не менять' : '', autocomplete: 'off' }) as HTMLInputElement,
+    endpoint: h('input', { class: 'input mono', placeholder: 'https://s3.ru1.storage.beget.cloud (пусто - AWS)', value: ST.endpoint ?? '' }) as HTMLInputElement,
+    prefix: h('input', { class: 'input mono', placeholder: 'myapp (необязательно)', value: ST.prefix ?? '' }) as HTMLInputElement,
+  }
+  const [psRow, pathStyle] = check('Path-style (bucket в пути)', ST.forcePathStyle ?? true, 'для MinIO и большинства S3-совместимых; для AWS выключите')
+  s3box.append(
+    h('div', { class: 'grid2' }, field('Бакет', s3fields.bucket), field('Регион', s3fields.region)),
+    h('div', { class: 'grid2' }, field('Access key', s3fields.accessKeyId), field('Secret key', s3fields.secretAccessKey)),
+    h('div', { class: 'grid2' }, field('Endpoint', s3fields.endpoint), field('Префикс', s3fields.prefix)),
+    psRow,
+  )
+  const showS3 = () => (s3box.hidden = !s3on.checked)
+  s3on.addEventListener('change', showS3)
+  showS3()
+  const s3Err = h('div', { class: 'error-text' })
+  const s3Test = h('button', { class: 'btn', type: 'button' }, 'Проверить хранилище')
+  s3Test.addEventListener('click', async () => {
+    s3Err.textContent = ''
+    try {
+      // проверяем сохранённое: сначала сохранить, потом тест
+      if (!sro && !(await save())) return
+      const r = await api('POST', 'settings/storage/test')
+      toast(r.kind === 's3' ? `S3 отвечает (${r.ms} мс)` : `Локальная папка пишется (${r.ms} мс)`)
+    } catch (e) {
+      s3Err.textContent = errorText(e)
+    }
+  })
+  const storageForm = h(
+    'div',
+    { class: 'panel' },
+    h('h2', {}, 'Файлы', sro && h('span', { class: 'badge warn' }, ' задано в mabase.config.ts или env')),
+    h('p', { class: 'muted' }, 'Где лежат байты файлов. Метаданные всегда в базе. Переключение не переносит старые файлы - для этого mabase files migrate.'),
+    s3Row,
+    s3box,
+    s3Err,
+    s3Test,
+  )
+  if (sro) for (const el of storageForm.querySelectorAll('input')) (el as HTMLInputElement).disabled = true
+
   const save = async (): Promise<boolean> => {
-    authErr.textContent = mailErr.textContent = ''
+    authErr.textContent = mailErr.textContent = s3Err.textContent = ''
     const body: any = {}
     if (!ro)
       body.auth = {
@@ -1832,14 +1881,29 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
         appUrl: appUrl.value.trim(),
       }
     if (!mro) body.mail = { mode: mode.value, from: from.value, appName: appName.value, smtp: { host: host.value, port: port.value ? Number(port.value) : undefined, secure: tls.checked, user: user.value, pass: pass.value } }
-    if (!body.auth && !body.mail) return true
+    if (!sro)
+      body.storage = s3on.checked
+        ? {
+            s3: {
+              bucket: s3fields.bucket.value,
+              region: s3fields.region.value,
+              accessKeyId: s3fields.accessKeyId.value,
+              secretAccessKey: s3fields.secretAccessKey.value,
+              endpoint: s3fields.endpoint.value,
+              prefix: s3fields.prefix.value,
+              forcePathStyle: pathStyle.checked,
+            },
+          }
+        : {}
+    if (!body.auth && !body.mail && body.storage === undefined) return true
     try {
       await api('PUT', 'settings', body)
       toast('Настройки сохранены и уже работают')
       return true
     } catch (e) {
       const t = errorText(e)
-      if (/почт|smtp|mail/i.test(t)) mailErr.textContent = t
+      if (/s3|хранилищ|бакет|bucket|endpoint/i.test(t)) s3Err.textContent = t
+      else if (/почт|smtp|mail/i.test(t)) mailErr.textContent = t
       else authErr.textContent = t
       return false
     }
@@ -1883,7 +1947,7 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
       h('button', { class: 'btn', onclick: () => (location.hash = '#/') }, 'Пропустить - оставить по умолчанию'),
     )
   } else if (!ro || !mro) buttons.append(h('button', { class: 'btn primary', onclick: () => save() }, 'Сохранить'))
-  page.append(authForm, mailForm, buttons)
+  page.append(authForm, mailForm, storageForm, buttons)
   if (!first && base) page.append(base)
 }
 

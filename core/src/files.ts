@@ -165,17 +165,21 @@ export class S3Storage implements FileStorage {
     const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '')
     const date = amzDate.slice(0, 8)
     const scope = `${date}/${this.opts.region}/s3/aws4_request`
-    const headers: Record<string, string> = { host, 'x-amz-content-sha256': payloadHash, 'x-amz-date': amzDate }
-    if (this.opts.sessionToken) headers['x-amz-security-token'] = this.opts.sessionToken
-    const names = Object.keys(headers).sort()
+    // host участвует в подписи, но в запрос его не кладём: fetch выставит сам,
+    // а второй заголовок Host некоторые S3-серверы (Beget) рвут соединением.
+    const signedHeaders: Record<string, string> = { host, 'x-amz-content-sha256': payloadHash, 'x-amz-date': amzDate }
+    if (this.opts.sessionToken) signedHeaders['x-amz-security-token'] = this.opts.sessionToken
+    const names = Object.keys(signedHeaders).sort()
     const signed = names.join(';')
-    const canonicalHeaders = names.map((k) => `${k}:${headers[k]}\n`).join('')
+    const canonicalHeaders = names.map((k) => `${k}:${signedHeaders[k]}\n`).join('')
     const canonicalUri = path.split('/').map(encodeRfc3986).join('/')
     const canonicalRequest = `${method}\n${canonicalUri}\n\n${canonicalHeaders}\n${signed}\n${payloadHash}`
     const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256hex(canonicalRequest)}`
     const signingKey = hmac(hmac(hmac(hmac(`AWS4${this.opts.secretAccessKey}`, date), this.opts.region), 's3'), 'aws4_request')
     const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex')
-    return { ...headers, authorization: `AWS4-HMAC-SHA256 Credential=${this.opts.accessKeyId}/${scope}, SignedHeaders=${signed}, Signature=${signature}` }
+    const sent: Record<string, string> = { 'x-amz-content-sha256': payloadHash, 'x-amz-date': amzDate }
+    if (this.opts.sessionToken) sent['x-amz-security-token'] = this.opts.sessionToken
+    return { ...sent, authorization: `AWS4-HMAC-SHA256 Credential=${this.opts.accessKeyId}/${scope}, SignedHeaders=${signed}, Signature=${signature}` }
   }
 
   private async request(method: string, key: string, body?: Uint8Array, extra?: Record<string, string>): Promise<Response> {
@@ -217,10 +221,15 @@ export class S3Storage implements FileStorage {
 // ---------- файлы поверх хранилища ----------
 
 export class FileStore {
+  storage: FileStorage
+
   constructor(
-    readonly storage: FileStorage,
+    // хранилище можно заменить на ходу: админка переключает локальную папку и S3
+    storage: FileStorage,
     readonly maxUpload = DEFAULT_MAX_FILE,
-  ) {}
+  ) {
+    this.storage = storage
+  }
 
   // Проверить и записать загруженные файлы. Возвращает значения полей документа
   // и метаданные для _files. Ошибка на любом файле - записанные удаляются.

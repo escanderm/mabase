@@ -27,7 +27,7 @@ import { expandDocs, parseExpand } from './expand'
 import { validateQuery } from './query'
 import { SUPERUSER_SESSIONS, SUPERUSERS, type Superuser, type Superusers } from './superusers'
 import type { Mailer } from './mail'
-import { FILES, type FileFields, type FileMeta, type FileStore, type Upload } from './files'
+import { FILES, type FileFields, type FileMeta, type FileStore, S3Storage, type Upload } from './files'
 import { parseRange } from './http'
 import { forbiddenSegment } from './paths'
 import { COLLECTIONS, type Registry } from './registry'
@@ -152,6 +152,24 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
           await o.settings.save((await r.body()) as StoredSettings)
           by(me, 'settings', {})
           return json(settingsView(url.origin))
+        }
+        // Проверка хранилища файлов: записали, прочитали, убрали. Для S3 это
+        // реальный запрос в облако теми ключами, что сохранены.
+        if (a === 'storage' && b === 'test' && m === 'POST') {
+          const store = o.files
+          if (!store) throw bad('файлы не настроены')
+          const meta: FileMeta = { _id: `test-${Date.now()}`, collection: '_test', recordId: 'test', field: 'test', name: 'connect.txt', size: 5, mime: 'text/plain', createdAt: Date.now() }
+          const data = new TextEncoder().encode('hello')
+          const t0 = performance.now()
+          try {
+            await store.storage.put(meta, data)
+            const back = await store.storage.get(meta)
+            await store.storage.delete(meta)
+            if (new TextDecoder().decode(back) !== 'hello') throw new Error('хранилище вернуло не то, что записали')
+          } catch (err) {
+            throw bad(`хранилище не работает: ${(err as Error).message}`)
+          }
+          return json({ ok: true, kind: store.storage instanceof S3Storage ? 's3' : 'local', ms: Math.round(performance.now() - t0) })
         }
         if (a === 'test-mail' && m === 'POST') {
           const { to } = await r.body()

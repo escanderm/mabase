@@ -179,8 +179,16 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
     const fixed = {
       auth: ['providers', 'signup', 'oauth', 'appUrl', 'minPasswordLength'].some((k) => (a as any)[k] !== undefined),
       mail: !!(cfg.mail?.smtp || cfg.mail?.send),
+      storage: !!cfg.storage?.s3, // конфиг/env главнее админки
     }
-    const settings = new Settings(db, secret, auth, mail, fixed)
+    // Файлы: смена настроек в админке переключает хранилище без перезапуска.
+    // Старые файлы остаются там, где лежали - их переносит `files migrate`.
+    const settings = new Settings(db, secret, auth, mail, fixed, {
+      onStorage: (s3) => {
+        files.storage = s3 ? new S3Storage(s3) : new LocalStorage(join(cfg.dataDir, 'files'))
+      },
+      liveStorage: () => (files.storage instanceof S3Storage ? files.storage.opts : null),
+    })
     await settings.load(warn)
     const registry = new Registry(db)
     await registry.load(warn)

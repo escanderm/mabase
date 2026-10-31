@@ -55,6 +55,13 @@ const walkZod = (dir: string, rel: string) => {
 walkZod(join(import.meta.dir, 'node_modules', 'zod'), '')
 writeFileSync('src/generated/zod-types.ts', `// Сгенерировано build.ts - не править\nexport default ${JSON.stringify(zodTypes)} as Record<string, string>\n`)
 
+// Публичный ключ подписи релизов: вшивается в бинарник. Пусто - сборка без
+// проверки подписи (mabase update честно предупредит).
+writeFileSync(
+  'src/generated/release.ts',
+  `// Сгенерировано build.ts - не править\nexport const RELEASE_PUBLIC_KEY = ${JSON.stringify(process.env.MABASE_RELEASE_PUBLIC_KEY ?? '')}\n`,
+)
+
 async function compile(out: string, target?: string): Promise<void> {
   const local = target && process.env.BUN_TARGETS_DIR && join(process.env.BUN_TARGETS_DIR, target)
   const flags = !target ? [] : local && existsSync(local) ? [`--target=${target}`, `--compile-executable-path=${local}`] : [`--target=${target}`]

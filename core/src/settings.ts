@@ -1,5 +1,5 @@
-// Настройки из админки (design.md §11, §17): способы входа и почта. Живут в
-// базе (_settings), меняются без перезапуска.
+// Настройки из админки (design.md §11, §17): способы входа, почта и файлы
+// (S3). Живут в базе (_settings), меняются без перезапуска.
 //
 // - Код главнее: если в mabase.config.ts есть раздел auth или mail, этот
 //   раздел задан кодом, админка его только показывает.
@@ -14,6 +14,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { Auth, type AuthProvider, type AuthSettings } from './auth'
 import type { Db } from './db'
 import { ActionError } from './errors'
+import { S3Storage, type S3Options } from './files'
 import { Mailer, type MailOptions } from './mail'
 
 export const SETTINGS = '_settings'
@@ -35,9 +36,30 @@ export type StoredSettings = {
     appName?: string
     smtp?: { host?: string; port?: number; secure?: boolean; user?: string; pass?: string }
   }
+  // Нет s3 - файлы в локальной папке. Секреты шифруются, как у почты.
+  storage?: {
+    s3?: {
+      bucket?: string
+      region?: string
+      accessKeyId?: string
+      secretAccessKey?: string
+      endpoint?: string
+      prefix?: string
+      forcePathStyle?: boolean
+      sessionToken?: string
+    }
+  }
 }
 
-export type SettingsView = StoredSettings & { fixed: { auth: boolean; mail: boolean } }
+export type SettingsView = StoredSettings & { fixed: { auth: boolean; mail: boolean; storage: boolean } }
+
+export type SettingsOptions = {
+  // Применить хранилище файлов: null - локальная папка. Вызывается при старте
+  // и после сохранения настроек (файлы переключаются без перезапуска).
+  onStorage?: (s3: S3Options | null) => void
+  // Что реально работает - для вида, когда раздел задан кодом.
+  liveStorage?: () => S3Options | null
+}
 
 const OAUTH = ['google', 'github'] as const
 const bad = (m: string) => new ActionError('bad_request', m)
@@ -51,7 +73,8 @@ export class Settings {
     secret: string,
     private auth: Auth,
     private mail: Mailer,
-    readonly fixed: { auth: boolean; mail: boolean },
+    readonly fixed: { auth: boolean; mail: boolean; storage: boolean },
+    private opts: SettingsOptions = {},
   ) {
     this.key = createHash('sha256').update(`mabase-settings:${secret}`).digest()
     db.collection(SETTINGS)
@@ -75,6 +98,7 @@ export class Settings {
     const auth = { ...this.current.auth }
     for (const p of OAUTH) if (auth[p]) auth[p] = { ...auth[p], clientSecret: auth[p]!.clientSecret ? '***' : '' }
     const mail = { ...this.current.mail, smtp: this.current.mail?.smtp && { ...this.current.mail.smtp, pass: this.current.mail.smtp.pass ? '***' : '' } }
+    const storage = this.fixed.storage ? this.liveStorageView() : maskStorage(this.current.storage)
     // Раздел задан кодом - показываем, что работает на самом деле
     const live = this.auth.settings
     return {
@@ -91,6 +115,7 @@ export class Settings {
           }
         : auth,
       mail: this.fixed.mail ? { mode: this.mail.mode === 'dev' ? 'dev' : 'smtp', appName: this.mail.appName } : mail,
+      storage,
     }
   }
 
@@ -98,9 +123,11 @@ export class Settings {
     if (!patch || typeof patch !== 'object') throw bad('настройки - объект')
     if (patch.auth && this.fixed.auth) throw new ActionError('conflict', 'Вход задан в mabase.config.ts - меняйте там')
     if (patch.mail && this.fixed.mail) throw new ActionError('conflict', 'Почта задана в mabase.config.ts - меняйте там')
+    if (patch.storage && this.fixed.storage) throw new ActionError('conflict', 'Файлы (S3) заданы в mabase.config.ts или env - меняйте там')
     const next: StoredSettings = {
       auth: patch.auth ? clean(patch.auth, this.current.auth) : this.current.auth,
       mail: patch.mail ? cleanMail(patch.mail, this.current.mail) : this.current.mail,
+      storage: patch.storage ? cleanStorage(patch.storage, this.current.storage) : this.current.storage,
     }
     try {
       this.apply(next) // проверка и применение; ошибка - ничего не поменялось
@@ -119,6 +146,12 @@ export class Settings {
     if (authOpts) Auth.check(authOpts, mailMode)
     if (mailOpts) this.mail.configure(mailOpts)
     if (authOpts) this.auth.configure(authOpts)
+    if (!this.fixed.storage) this.opts.onStorage?.(toStorage(s.storage))
+  }
+
+  private liveStorageView(): StoredSettings['storage'] {
+    const s3 = this.opts.liveStorage?.()
+    return s3 ? { s3: maskStorage({ s3 })?.s3 } : {}
   }
 
   private encrypt(s: StoredSettings): StoredSettings {
@@ -152,7 +185,59 @@ function mapSecrets(s: StoredSettings, f: (v: string) => string): StoredSettings
     if (c?.clientSecret) c.clientSecret = f(c.clientSecret)
   }
   if (out.mail?.smtp?.pass) out.mail.smtp.pass = f(out.mail.smtp.pass)
+  const s3 = out.storage?.s3
+  if (s3?.secretAccessKey) s3.secretAccessKey = f(s3.secretAccessKey)
+  if (s3?.sessionToken) s3.sessionToken = f(s3.sessionToken)
   return out
+}
+
+function maskStorage(s: StoredSettings['storage']): StoredSettings['storage'] {
+  if (!s?.s3) return s
+  return { s3: { ...s.s3, secretAccessKey: s.s3.secretAccessKey ? '***' : '', sessionToken: s.s3.sessionToken ? '***' : '' } }
+}
+
+// Проверенная настройка S3: null - локальная папка.
+export function toStorage(s: StoredSettings['storage'] = {}): S3Options | null {
+  const p = s.s3
+  if (!p) return null
+  const opts: S3Options = {
+    bucket: p.bucket ?? '',
+    region: p.region ?? '',
+    accessKeyId: p.accessKeyId ?? '',
+    secretAccessKey: p.secretAccessKey ?? '',
+    ...(p.endpoint && { endpoint: p.endpoint }),
+    ...(p.prefix && { prefix: p.prefix }),
+    ...(p.forcePathStyle !== undefined && { forcePathStyle: p.forcePathStyle }),
+    ...(p.sessionToken && { sessionToken: p.sessionToken }),
+  }
+  new S3Storage(opts) // проверка: обязательные поля, endpoint
+  return opts
+}
+
+// Секрет "***" или пусто - оставить прежний.
+export function cleanStorage(s: NonNullable<StoredSettings['storage']>, prev: StoredSettings['storage'] = {}): StoredSettings['storage'] {
+  if (!s.s3) return undefined // выключили - обратно в локальную папку
+  const p = s.s3
+  // Поле не пришло - берём прежнее; пришло пустым - значит очистили (для
+  // обязательных это ошибка ниже). Секреты: '' и '***' - «не менять».
+  const given = <T>(v: T | undefined, prev: T | undefined) => (v === undefined ? prev : v)
+  const out = {
+    bucket: given(p.bucket === undefined ? undefined : (str(p.bucket, 's3.bucket', 200) ?? ''), prev.s3?.bucket),
+    region: given(p.region === undefined ? undefined : (str(p.region, 's3.region', 100) ?? ''), prev.s3?.region),
+    accessKeyId: given(p.accessKeyId === undefined ? undefined : (str(p.accessKeyId, 's3.accessKeyId', 200) ?? ''), prev.s3?.accessKeyId),
+    secretAccessKey: keepSecret(p.secretAccessKey, prev.s3?.secretAccessKey, 's3.secretAccessKey'),
+    endpoint: given(p.endpoint === undefined ? undefined : (str(p.endpoint, 's3.endpoint', 300) ?? ''), prev.s3?.endpoint),
+    prefix: given(p.prefix === undefined ? undefined : (str(p.prefix, 's3.prefix', 200) ?? ''), prev.s3?.prefix),
+    forcePathStyle: p.forcePathStyle === undefined ? prev.s3?.forcePathStyle : !!p.forcePathStyle,
+    sessionToken: keepSecret(p.sessionToken, prev.s3?.sessionToken, 's3.sessionToken'),
+  }
+  const storage = { s3: out }
+  try {
+    toStorage(storage) // ошибка с понятным текстом - до сохранения
+  } catch (err) {
+    throw bad((err as Error).message)
+  }
+  return storage
 }
 
 const str = (v: unknown, name: string, max = 500): string | undefined => {

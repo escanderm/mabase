@@ -2,11 +2,13 @@
 //
 // - Берёт последний релиз: <api>/releases/latest.
 // - Архив под эту ОС и процессор: mabase-<os>-<arch>.tar.gz.
-// - Сверяет sha256 с checksums.txt того же релиза. Не совпало - ничего не меняем.
+// - Проверяет подпись checksums.txt (Ed25519), если в бинарник вшит публичный
+//   ключ, и сверяет sha256 архива с checksums.txt. Не совпало - ничего не меняем.
 // - Новый бинарник пишется рядом и запускается с `version`. Не запустился
 //   (чужая архитектура, битая подпись на macOS) - старый остаётся на месте.
 // - Подмена через rename: запущенный сервер продолжает работать со старым
 //   файлом, пока его не перезапустят. Данные (mb_data) не трогаем.
+import { createPublicKey, verify } from 'node:crypto'
 import { chmodSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 
@@ -20,6 +22,32 @@ export type UpdateOptions = {
   platform?: string // darwin-arm64, linux-x64 ...
   check?: boolean // только узнать, есть ли новая
   out?: (line: string) => void
+  publicKey?: string // ключ подписи; по умолчанию вшитый при сборке, '' - не проверять
+}
+
+// DER-префикс SPKI для Ed25519: дальше идут 32 байта открытого ключа.
+const SPKI_ED25519 = Buffer.from('302a300506032b6570032100', 'hex')
+
+export function verifyEd25519(data: Uint8Array, sigBase64: string, pubBase64: string): boolean {
+  const raw = Buffer.from(pubBase64.trim(), 'base64')
+  if (raw.length !== 32) return false
+  const sig = Buffer.from(sigBase64.trim(), 'base64')
+  if (sig.length !== 64) return false
+  const key = createPublicKey({ key: Buffer.concat([SPKI_ED25519, raw]), format: 'der', type: 'spki' })
+  return verify(null, data, key, sig)
+}
+
+// Публичный ключ, вшитый при сборке. В исходниках generated может не быть -
+// тогда проверки нет (и об этом честно предупреждаем в update).
+async function embeddedKey(): Promise<string> {
+  try {
+    // путь собран из кусков: файл генерируется build.ts и его нет в исходниках,
+    // а статический import сломал бы tsc
+    const m = (await import('./generated/' + 'release')) as { RELEASE_PUBLIC_KEY?: string }
+    return m.RELEASE_PUBLIC_KEY ?? ''
+  } catch {
+    return ''
+  }
 }
 
 export type UpdateResult = { current: string; latest: string; updated: boolean }
@@ -55,7 +83,22 @@ export async function update(o: UpdateOptions): Promise<UpdateResult> {
   if (!sums) throw new Error(`в релизе ${rel.tag_name} нет checksums.txt`)
 
   out(`Скачиваю ${name} (${rel.tag_name})...`)
-  const [archive, sumsText] = await Promise.all([download(asset.browser_download_url, headers), download(sums.browser_download_url, headers).then((b) => new TextDecoder().decode(b))])
+  const [archive, sumsBytes] = await Promise.all([download(asset.browser_download_url, headers), download(sums.browser_download_url, headers)])
+  const sumsText = new TextDecoder().decode(sumsBytes)
+
+  // Подпись: сборка с вшитым ключом требует checksums.txt.sig и отвергает
+  // релиз без неё. Сборка без ключа (своя, из исходников) - только sha256.
+  const key = o.publicKey ?? (await embeddedKey())
+  if (key) {
+    const sigAsset = rel.assets.find((a) => a.name === 'checksums.txt.sig')
+    if (!sigAsset) throw new Error(`в релизе ${rel.tag_name} нет checksums.txt.sig: подпись обязательна, ничего не изменено`)
+    const sigText = new TextDecoder().decode(await download(sigAsset.browser_download_url, headers))
+    if (!verifyEd25519(sumsBytes, sigText, key)) throw new Error('подпись checksums.txt не сходится: релиз подменён или подписан другим ключом. Ничего не изменено')
+    out('Подпись checksums.txt проверена')
+  } else {
+    out('Сборка без ключа подписи: проверяется только sha256 архива (mabase update не узнает подмену checksums.txt)')
+  }
+
   const want = sumsText.split('\n').map((l) => l.trim().split(/\s+\*?/)).find(([, file]) => file === name)?.[0]
   if (!want) throw new Error(`в checksums.txt нет строки для ${name}`)
   // Bun требует Uint8Array<ArrayBuffer>, download отдаёт ArrayBufferLike: те же байты
