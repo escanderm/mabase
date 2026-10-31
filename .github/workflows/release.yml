@@ -22,6 +22,7 @@ jobs:
         with:
           bun-version: 1.3.12
       - run: bun install --frozen-lockfile
+      - run: bun run typecheck
       - run: bun test --timeout 180000
       - run: bun run release
       - name: Проверить сборки

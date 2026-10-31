@@ -2,8 +2,9 @@
 
 ## 0.2.9
 
-- Проверка типов в CI: `bun run typecheck` (`tsc --noEmit`, `strict` +
-  `noUncheckedIndexedAccess`) на каждой правке, в обоих окружениях матрицы.
+- Проверка типов: `bun run typecheck` (`tsc --noEmit`, `strict` +
+  `noUncheckedIndexedAccess`) на каждой правке в CI (оба окружения матрицы) и
+  перед сборкой релиза.
 - В devDependencies добавлены `typescript` и `@types/bun`: без них `tsc` не
   видел `Bun`, `process` и `node:*`, и «243 ошибки» были в основном этим, а не
   кодом.
