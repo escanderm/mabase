@@ -5,7 +5,7 @@
 // транзакции удаляет файл, а падение между записью и коммитом оставляет
 // сироту - это безопасно, на неё никто не ссылается.
 import { createHash, createHmac } from 'node:crypto'
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Change, Db } from './db'
 import { ActionError, NotFoundError } from './errors'
@@ -49,6 +49,8 @@ export interface FileStorage {
   put(meta: FileMeta, bytes: Uint8Array): Promise<void>
   get(meta: FileMeta): Promise<Uint8Array>
   delete(meta: FileMeta): Promise<void>
+  // Есть ли файл в хранилище. Нужен переносу: не копировать то, что уже там.
+  head(meta: FileMeta): Promise<boolean>
   removeRecord?(collection: string, recordId: string): Promise<void>
 }
 
@@ -84,6 +86,10 @@ export class LocalStorage implements FileStorage {
     try {
       unlinkSync(this.pathFor(meta))
     } catch {}
+  }
+
+  async head(meta: FileMeta): Promise<boolean> {
+    return existsSync(this.pathFor(meta))
   }
 
   async removeRecord(collection: string, recordId: string): Promise<void> {
@@ -178,6 +184,11 @@ export class S3Storage implements FileStorage {
 
   async delete(meta: FileMeta): Promise<void> {
     await this.request('DELETE', this.key(meta))
+  }
+
+  async head(meta: FileMeta): Promise<boolean> {
+    const res = await this.request('HEAD', this.key(meta))
+    return res.status !== 404
   }
 }
 
@@ -302,4 +313,55 @@ export function attachFileCleanup(opts: {
       for (const m of metas) await files.removeOne(m)
     })().catch((err) => onError(err, 'файлы: уборка'))
   })
+}
+
+// Перенос файлов между хранилищами (design.md §16): локальная папка <-> S3.
+// Идемпотентно: что уже лежит в целевом хранилище - пропускается. Источник не
+// удаляется: сначала проверьте, что всё на месте, потом уберите руками.
+export type MigrateReport = {
+  total: number
+  copied: number
+  skipped: number
+  bytes: number
+  failed: Array<{ id: string; error: string }>
+}
+
+export async function migrateFiles(
+  db: Db,
+  from: FileStorage,
+  to: FileStorage,
+  opts: { dryRun?: boolean; batch?: number; onProgress?: (r: MigrateReport) => void } = {},
+): Promise<MigrateReport> {
+  const report: MigrateReport = { total: 0, copied: 0, skipped: 0, bytes: 0, failed: [] }
+  const batch = opts.batch ?? 500
+  let last = ''
+  for (;;) {
+    // Курсор по _id: _files может быть большим, листаем страницами
+    const page = await db.c[FILES]!.find(last ? { _id: { $gt: last } } : {}, { sort: { _id: 1 }, limit: batch })
+    if (!page.length) break
+    for (const doc of page) {
+      const meta = doc as unknown as FileMeta
+      report.total++
+      try {
+        if (await to.head(meta)) {
+          report.skipped++
+          continue
+        }
+        if (opts.dryRun) {
+          report.copied++
+          report.bytes += meta.size
+          continue
+        }
+        const bytes = await from.get(meta)
+        await to.put(meta, bytes)
+        report.copied++
+        report.bytes += bytes.byteLength
+      } catch (err) {
+        report.failed.push({ id: meta._id, error: (err as Error).message })
+      }
+    }
+    last = page[page.length - 1]!._id
+    opts.onProgress?.(report)
+  }
+  return report
 }

@@ -122,7 +122,7 @@ describe('перезагрузка хуков', () => {
     mkdirSync(join(root, 'mb_hooks'))
     writeFileSync(join(root, 'mb_hooks', 'a.ts'), `import { on } from 'mabase'\non('boot', async () => {})`)
 
-    const { config, hooks } = await loadProject({ root, dir: join(root, 'mb_data'), port: 0, dev: false, check: false, given: {} })
+    const { config, hooks } = await loadProject({ root, dir: join(root, 'mb_data'), port: 0, dev: false, check: false, dryRun: false, given: {} })
     expect(hooks).toEqual(['a.ts'])
     expect(config.hooksDir).toBe(join(root, 'mb_hooks'))
     expect(config.watchHooks).toBeUndefined() // по умолчанию включено, если папка задана

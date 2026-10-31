@@ -17,6 +17,7 @@ import * as api from './api'
 import { openDb } from './db'
 import { LockedError } from './errors'
 import { configView } from './config-view'
+import { LocalStorage, S3Storage, migrateFiles, type FileStorage } from './files'
 import { readEnv } from './env'
 import type { S3Options } from './files'
 import type { SmtpOptions } from './mail'
@@ -51,6 +52,9 @@ export type Flags = {
   root: string
   dev: boolean
   check: boolean
+  dryRun: boolean
+  filesFrom?: string // mabase files migrate --from
+  filesTo?: string // --to
   given: { dir?: boolean; port?: boolean; host?: boolean; public?: boolean } // что задано флагом (приоритет над env)
 }
 
@@ -59,13 +63,15 @@ export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags:
   const raw: Record<string, string> = {}
   let dev = false
   let check = false
+  let dryRun = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!
     if (a === '--dev') dev = true
     else if (a === '--check') check = true
+    else if (a === '--dry-run') dryRun = true
     else if (a.startsWith('--')) {
       const [k, v] = a.slice(2).split('=', 2) as [string, string | undefined]
-      if (!['dir', 'port', 'host', 'public', 'root'].includes(k)) throw new UsageError(`неизвестный флаг --${k}`)
+      if (!['dir', 'port', 'host', 'public', 'root', 'from', 'to'].includes(k)) throw new UsageError(`неизвестный флаг --${k}`)
       const value = v ?? argv[++i]
       if (value === undefined) throw new UsageError(`--${k}: нужно значение`)
       raw[k] = value
@@ -85,6 +91,9 @@ export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags:
       public: raw.public && resolve(root, raw.public),
       dev,
       check,
+      dryRun,
+      filesFrom: raw.from,
+      filesTo: raw.to,
       given: {
         ...(raw.dir !== undefined && { dir: true }),
         ...(raw.port !== undefined && { port: true }),
@@ -346,6 +355,43 @@ export async function run(argv: string[], out: (line: string) => void = console.
       }
       return
     }
+    case 'files': {
+      if (args[0] !== 'migrate') throw new UsageError('mabase files migrate --from local|s3 --to local|s3 [--dry-run]')
+      const fromSide = flags.filesFrom
+      const toSide = flags.filesTo
+      if (fromSide !== 'local' && fromSide !== 's3') throw new UsageError('--from local|s3')
+      if (toSide !== 'local' && toSide !== 's3') throw new UsageError('--to local|s3')
+      if (fromSide === toSide) throw new UsageError('--from и --to совпадают: переносить некуда')
+      const { config, warnings } = await loadProject(flags)
+      for (const w of warnings) out(`[mabase] ${w}`)
+      const local = new LocalStorage(join(config.dataDir, 'files'))
+      const s3 = config.storage?.s3 ? new S3Storage(config.storage.s3) : null
+      const side = (name: string): FileStorage => {
+        if (name === 'local') return local
+        if (!s3) throw new UsageError('для S3 нужны настройки storage.s3: mabase.config.ts или MABASE_S3_*')
+        return s3
+      }
+      const app = await openApp(config).catch(lockedHint)
+      try {
+        const t = performance.now()
+        const r = await migrateFiles(app.db, side(fromSide), side(toSide), {
+          dryRun: flags.dryRun,
+          onProgress: (p) => out(`  … ${p.copied + p.skipped} из ${p.total}`),
+        })
+        const what = flags.dryRun ? 'нужно перенести' : 'перенесено'
+        out(`${flags.dryRun ? 'Проверка (ничего не скопировано)' : 'Готово'}: всего ${r.total}, ${what} ${r.copied}, уже было ${r.skipped}, ${(r.bytes / 1e6).toFixed(1)} МБ, ${Math.round(performance.now() - t)} мс`)
+        for (const f of r.failed.slice(0, 10)) out(`  ошибка ${f.id}: ${f.error}`)
+        if (r.failed.length) {
+          out(`Не перенесено файлов: ${r.failed.length} - проверьте источник и повторите`)
+          process.exitCode = 1
+        } else if (!flags.dryRun && r.copied) {
+          out('Источник не удалён: проверьте, что всё на месте, и уберите старое сами')
+        }
+      } finally {
+        await app.close()
+      }
+      return
+    }
     case 'config': {
       const { config, sources, hooks, warnings } = await loadProject(flags)
       for (const w of warnings) out(`[mabase] ${w}`)
@@ -406,6 +452,8 @@ const HELP = `MaBase ${VERSION}
   mabase seed   - выполнить seed.ts (сервер должен быть остановлен)
   mabase migrate - применить миграции из mb_migrations/ (сервер остановлен)
   mabase config - показать настройки и откуда взято каждое значение
+  mabase files migrate --from local|s3 --to local|s3 [--dry-run]
+                - перенести файлы между локальной папкой и S3
   mabase backup <папка>
   mabase import <коллекция> <файл.ndjson>
   mabase tail   - живой журнал работающего сервера: коммиты, действия, события, ошибки
