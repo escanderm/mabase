@@ -3,7 +3,7 @@
 // sift умеет $where и выполняет строку как код.
 import sift from 'sift'
 import { QueryError } from './errors'
-import { getPath, pathValues } from './paths'
+import { forbiddenSegment, getPath, pathValues } from './paths'
 
 export type Doc = Record<string, any> & { _id: string }
 export type Query = Record<string, unknown>
@@ -30,22 +30,41 @@ const isScalar = (v: unknown) => v === null || ['string', 'number', 'boolean'].i
 
 export { getPath, pathValues } from './paths'
 
+// Ошибка пути - ошибка клиента, а не повод молча записать в прототип или
+// потерять скаляр, через который проходит вложенный путь (в Mongo это тоже ошибка).
+function checkPath(path: string, op: string): void {
+  const forbidden = forbiddenSegment(path)
+  if (forbidden) throw new QueryError(`${op}.${path}: имя ${forbidden} в пути недопустимо`)
+}
+
 function setPath(doc: any, path: string, value: unknown): void {
+  checkPath(path, '$set')
   const parts = path.split('.')
   let cur = doc
   for (let i = 0; i < parts.length - 1; i++) {
     const p = parts[i]!
-    if (cur[p] == null || typeof cur[p] !== 'object') cur[p] = {}
+    const at = parts.slice(0, i + 1).join('.')
+    const existing = Object.hasOwn(cur, p) ? cur[p] : undefined
+    if (existing === undefined || existing === null) {
+      cur[p] = {}
+    } else if (Array.isArray(existing)) {
+      if (!/^\d+$/.test(parts[i + 1]!)) throw new QueryError(`${path}: ${at} - массив, дальше можно только номер элемента`)
+    } else if (typeof existing !== 'object') {
+      throw new QueryError(`${path}: ${at} - не объект, вложенное поле задать нельзя`)
+    }
     cur = cur[p]
   }
   cur[parts[parts.length - 1]!] = value
 }
 
 function unsetPath(doc: any, path: string): void {
+  checkPath(path, '$unset')
   const parts = path.split('.')
   let cur = doc
   for (let i = 0; i < parts.length - 1; i++) {
-    cur = cur?.[parts[i]!]
+    const p = parts[i]!
+    if (cur === null || typeof cur !== 'object' || !Object.hasOwn(cur, p)) return
+    cur = cur[p]
     if (cur == null || typeof cur !== 'object') return
   }
   delete cur[parts[parts.length - 1]!]
@@ -90,6 +109,8 @@ function checkOperators(path: string, cond: Record<string, unknown>): void {
 function checkCondition(path: string, cond: unknown): void {
   if (path.startsWith('$')) throw new QueryError(`оператор ${path} не поддерживается`)
   if (path === '' || path.split('.').some((p) => p === '')) throw new QueryError(`пустое имя поля в "${path}"`)
+  const forbidden = forbiddenSegment(path)
+  if (forbidden) throw new QueryError(`${path}: имя ${forbidden} в пути недопустимо`)
   if (isScalar(cond) || cond instanceof RegExp) return
   if (Array.isArray(cond)) {
     if (!cond.every(isScalar)) throw new QueryError(`${path}: сравнение с массивом объектов не поддерживается`)
@@ -143,6 +164,8 @@ export function validateUpdate(update: unknown): asserts update is Update {
     for (const [path, v] of Object.entries(fields)) {
       const root = path.split('.')[0]!
       if ((SYSTEM_FIELDS as readonly string[]).includes(root)) throw new QueryError(`${op}: поле ${root} меняет только ядро`)
+      const forbidden = forbiddenSegment(path)
+      if (forbidden) throw new QueryError(`${op}.${path}: имя ${forbidden} в пути недопустимо`)
       if (op === '$inc' && (typeof v !== 'number' || !Number.isFinite(v))) throw new QueryError(`$inc.${path}: нужно число`)
       if (op === '$pull' && isPlainObject(v)) validateQuery(v)
     }

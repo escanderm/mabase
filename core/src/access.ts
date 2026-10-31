@@ -4,6 +4,7 @@
 import { project, type CollectionApi, type Db, type Doc, type FindOptions, type Query, type Update, type User } from './db'
 import { ActionError, NotFoundError, QueryError, ValidationError } from './errors'
 import { expandDocs } from './expand'
+import { forbiddenSegment } from './paths'
 import { applyUpdate, SYSTEM_FIELDS, validateQuery, validateUpdate } from './query'
 
 type Collections = Record<string, CollectionApi>
@@ -65,6 +66,13 @@ const USERS_RULES: Rules = {
 }
 
 const bad = (message: string, details?: unknown) => new ActionError('bad_request', message, details)
+
+// Путь, который клиент прислал в фильтре, сортировке, fields или в самом
+// документе: имена прототипа - это не поля, а запись в Object.prototype.
+function assertFieldPath(path: string, where: string): void {
+  const forbidden = forbiddenSegment(path)
+  if (forbidden) throw bad(`${where}: имя ${forbidden} в пути недопустимо`)
+}
 
 // Регулярное выражение от клиента: без групп, альтернатив и обратных ссылок,
 // не больше двух неограниченных повторов. Иначе один запрос с экспоненциальным
@@ -249,8 +257,10 @@ export class ClientSession {
 
   // Поле, которое клиент упоминает в фильтре, сортировке или fields, должно быть ему видно.
   // private закрыто и владельцу: фильтр шёл бы по чужим записям.
+  // Путь через прототип (__proto__, constructor) - не поле документа: отказ.
   checkField(c: string, path: string, where: string): void {
     const d = this.access._def(c)
+    assertFieldPath(path, where)
     const root = path.split('.')[0]!
     if (d.hidden.has(root) || d.private.has(root)) throw bad(`${where}: поле ${root} недоступно`)
   }
@@ -287,6 +297,7 @@ export class ClientSession {
   checkWrite(c: string, paths: string[], mode: 'create' | 'update', before?: Doc): void {
     const d = this.access._def(c)
     for (const path of paths) {
+      assertFieldPath(path, 'поле')
       const root = path.split('.')[0]!
       if ((SYSTEM_FIELDS as readonly string[]).includes(root)) throw new ActionError('forbidden', `поле ${root} задаёт сервер`)
       if (d.hidden.has(root) || d.readonly.has(root)) throw new ActionError('forbidden', `поле ${root} клиент не меняет`)

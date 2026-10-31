@@ -15,6 +15,7 @@ import {
   TxTimeoutError,
 } from './errors'
 import { FieldIndex, sortedInsert, sortedRemove } from './indexes'
+import { forbiddenSegment } from './paths'
 import { runFind, type CollState, type Explain, type FindOptions } from './planner'
 import { applyUpdate, assertJson, getPath, validateQuery, type Doc, type Query, type Update } from './query'
 import { checkIndexes, validateDoc, type Schema } from './schema'
@@ -143,6 +144,8 @@ export function project(doc: Doc, fields: string[] | undefined): Doc {
   if (!fields) return clone(doc)
   const out: any = { _id: doc._id }
   for (const f of fields) {
+    const forbidden = forbiddenSegment(f)
+    if (forbidden) throw new QueryError(`fields: имя ${forbidden} в пути недопустимо`)
     const v = getPath(doc, f)
     if (v === undefined) continue
     const parts = f.split('.')
@@ -636,7 +639,16 @@ export class Db {
     this.ensureOpen(tx)
     doc = this.finalize(c, doc)
     this.stage(tx, c, id, doc)
-    this.checkRefs(tx, c, doc, null) // после stage: ссылка на самого себя тоже находится
+    // Проверка ссылок - после stage: ссылка на самого себя тоже находится.
+    // Её ошибка отменяет всю транзакцию, как ошибка before*-хука: иначе
+    // поймавший её код оставил бы в overlay документ с битой ссылкой, и тот
+    // сохранился бы при коммите (design.md §10).
+    try {
+      this.checkRefs(tx, c, doc, null)
+    } catch (err) {
+      this.abortTx(tx, err)
+      throw err
+    }
     if (hooks?.afterCreate) {
       const h = hooks.afterCreate
       const saved = clone(doc)
@@ -666,7 +678,12 @@ export class Db {
     this.ensureOpen(tx)
     next = this.finalize(c, next)
     this.stage(tx, c, id, next)
-    this.checkRefs(tx, c, next, prev)
+    try {
+      this.checkRefs(tx, c, next, prev)
+    } catch (err) {
+      this.abortTx(tx, err)
+      throw err
+    }
     if (hooks?.afterUpdate) {
       const h = hooks.afterUpdate
       const p = clone(prev)
@@ -691,7 +708,14 @@ export class Db {
     }
     this.ensureOpen(tx)
     this.stage(tx, c, id, null)
-    await this.onDeleteRefs(tx, c, id, cascade)
+    try {
+      await this.onDeleteRefs(tx, c, id, cascade)
+    } catch (err) {
+      // restrict, глубина каскада и ошибки вложенных записей - как ошибка
+      // before*-хука: отменяется вся транзакция, а не только этот документ.
+      this.abortTx(tx, err)
+      throw err
+    }
     if (hooks?.afterDelete) {
       const h = hooks.afterDelete
       const p = clone(prev)

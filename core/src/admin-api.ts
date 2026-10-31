@@ -27,6 +27,7 @@ import { expandDocs, parseExpand } from './expand'
 import { validateQuery } from './query'
 import { SUPERUSER_SESSIONS, SUPERUSERS, type Superuser, type Superusers } from './superusers'
 import type { Mailer } from './mail'
+import { forbiddenSegment } from './paths'
 import { COLLECTIONS, type Registry } from './registry'
 import { SETTINGS, type Settings, type StoredSettings } from './settings'
 import { tailResponse, type Tail } from './tail'
@@ -48,6 +49,9 @@ type Req = { req: Request; url: URL; parts: string[]; ip?: string; body: () => P
 const HIDDEN_COLLECTIONS = new Set([SUPERUSERS, SUPERUSER_SESSIONS, SETTINGS, COLLECTIONS])
 const SYSTEM = ['_id', '_createdAt', '_updatedAt']
 const MAX_LIMIT = 1000
+// skip приводится к limit в запросе (skip + limit): огромный skip = перебор
+// всей коллекции одним запросом в единственном процессе.
+const MAX_SKIP = 100_000
 const bad = (m: string) => new ActionError('bad_request', m)
 const json = (body: unknown, status = 200) => Response.json(body, { status })
 
@@ -70,7 +74,14 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
   }
   const checkFields = (c: string, doc: unknown): Record<string, unknown> => {
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw bad('документ - объект')
-    for (const f of hidden(c)) if (f in (doc as object)) throw bad(`поле ${f} скрытое: админка его не пишет`)
+    const h = [...hidden(c)]
+    for (const k of Object.keys(doc as object)) {
+      // 'secret.x' - тоже запись в скрытое поле: проверяем корень пути, а не всё имя
+      const forbidden = forbiddenSegment(k)
+      if (forbidden) throw bad(`поле ${k}: имя ${forbidden} в пути недопустимо`)
+      const root = k.split('.')[0]!
+      if (h.includes(root)) throw bad(`поле ${root} скрытое: админка его не пишет`)
+    }
     return doc as Record<string, unknown>
   }
   const by = (me: Superuser, op: string, fields: Record<string, unknown>) => o.tail?.publish('admin', { by: me.email, op, ...fields })
@@ -201,6 +212,7 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
           if (sort && !Object.values(sort).every((v) => v === 1 || v === -1)) throw bad('sort: { поле: 1 или -1 }')
           const fields = param(q, 'fields') as Record<string, 0 | 1> | undefined
           const skip = int(q.get('skip'), 0, 'skip')
+          if (skip > MAX_SKIP) throw bad(`skip: не больше ${MAX_SKIP} - листайте фильтром по _id, а не сквозь всю коллекцию`)
           const limit = Math.min(int(q.get('limit'), 20, 'limit') || 20, MAX_LIMIT)
           const t0 = performance.now()
           const found = await coll.find(filter as Query, { sort, limit: skip + limit })

@@ -367,4 +367,41 @@ describe('админка: настройки и коллекции', () => {
       await fresh.stop()
     }
   })
+
+  test('151. hidden поле не пишется ключом с точкой: админка отвечает 400, значение в базе цело', async () => {
+    // Свой сервер: предыдущие тесты перезапускают общий s с другим конфигом,
+    // и коллекции notes с hidden там уже нет.
+    const fresh = await startServer({
+      dataDir: tmpDir('hidden'),
+      port: 0,
+      hostname: '127.0.0.1',
+      env: {},
+      onWarning: () => {},
+      db: { fsync: false },
+      // Без схемы: со схемой ('secret' - строка) испортить поле не дал бы zod,
+      // а бессхемная коллекция - обычный случай, и там дыра была настоящей.
+      collections: { notes: { fields: { hidden: ['secret'] as any } } },
+    })
+    try {
+      const setup = await fetch(`${fresh.url}/api/_/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: fresh.setupUrl!.split('/setup/')[1]!, email: 'hidden@example.test', password: 'admin-pass-12345' }),
+      }).then((r) => r.json())
+      const doc = await fresh.db.c.notes!.insert({ text: 'секретная заметка', secret: 'исходное' })
+      for (const body of [{ text: 'секретная заметка', 'secret.x': 1 }, { text: 'секретная заметка', secret: 'новое' }]) {
+        const res = await fetch(`${fresh.url}/api/_/c/notes/${doc._id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${setup.token}` },
+          body: JSON.stringify(body),
+        })
+        // Ключ 'secret.x' раньше проходил проверку (сравнивалось полное имя) и через
+        // setPath превращал скаляр в объект - то есть перезаписывал скрытое поле.
+        expect(res.status).toBe(400)
+        expect(fresh.db.peek('notes', doc._id)!.secret).toBe('исходное')
+      }
+    } finally {
+      await fresh.stop()
+    }
+  })
 })
