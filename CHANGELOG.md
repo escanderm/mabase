@@ -1,5 +1,18 @@
 # Изменения
 
+## 0.2.6
+
+- Типизированный клиент без генерации кода: `createClient<typeof config>(url)`
+  выводит коллекции и типы документов из zod-схем `defineCollection`, а
+  `mb.action('имя', input)` проверяет вход по схеме `defineAction`.
+- `defineCollection`, `defineAction` и `defineConfig` несут типы: имя коллекции
+  и действия - литералами, схема - своим типом (а не `z.ZodType<Record<...>>`).
+- В `mb_data/types.d.ts` появился модуль `mabase/client` с типами SDK:
+  `MabaseClient`, `CollectionClient`, `Live`, `MabaseError`, `createClient<Config>`.
+  В браузере `mabase/client` подключается import map или алиасом на `/api/client.js`.
+- Проверено `tsc --strict` на сгенерированных типах: положительные случаи
+  компилируются, неверные поля и несуществующие действия - ошибки.
+
 ## 0.2.5
 
 - Горячая перезагрузка хуков: `mabase serve` следит за `mb_hooks/`, правка

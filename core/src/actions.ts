@@ -17,26 +17,31 @@ export type ActionCtx<I, U> = {
 
 type Input<S> = S extends z.ZodType ? z.output<S> : undefined
 
-export type ActionDef = {
-  name: string
-  input?: z.ZodType
+// I - тип входа (из zod-схемы). Имя и схема нужны клиенту: он выводит из них
+// типы createClient<typeof config>().
+// S - сама схема: нужна клиенту, чтобы взять z.input (вход до парсинга).
+export type ActionDef<I = unknown, N extends string = string, S extends z.ZodType = z.ZodType> = {
+  name: N
+  input?: S
   public: boolean
   handler: (ctx: ActionCtx<any, any>) => unknown
 }
 
 // По умолчанию нужен вход: user не null. public: true - без входа.
-export function defineAction<S extends z.ZodType | undefined = undefined, R = unknown>(
-  name: string,
+// Возвращает ActionDef с литеральным именем и типом входа: из него
+// createClient<typeof config>() выводит mb.action('имя', {...}).
+export function defineAction<N extends string, S extends z.ZodType | undefined = undefined, R = unknown>(
+  name: N,
   def: { input?: S; public?: false; handler: (ctx: ActionCtx<Input<S>, User>) => R | Promise<R> },
-): ActionDef
-export function defineAction<S extends z.ZodType | undefined = undefined, R = unknown>(
-  name: string,
+): ActionDef<Input<S>, N, S extends z.ZodType ? S : z.ZodType>
+export function defineAction<N extends string, S extends z.ZodType | undefined = undefined, R = unknown>(
+  name: N,
   def: { input?: S; public: true; handler: (ctx: ActionCtx<Input<S>, User | null>) => R | Promise<R> },
-): ActionDef
-export function defineAction(
-  name: string,
+): ActionDef<Input<S>, N, S extends z.ZodType ? S : z.ZodType>
+export function defineAction<N extends string>(
+  name: N,
   def: { input?: z.ZodType; public?: boolean; handler: (ctx: ActionCtx<any, any>) => unknown },
-): ActionDef {
+): ActionDef<any, N> {
   if (!/^[A-Za-z][\w.-]*$/.test(name)) throw new TypeError(`defineAction: недопустимое имя "${name}"`)
   return { name, input: def.input, public: def.public === true, handler: def.handler }
 }

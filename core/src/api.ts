@@ -21,16 +21,27 @@ export type { ActionDef, MailMessage }
 // Коллекции внутри правила, хука, действия, сида: db.rooms.find(...).
 export type Db = Record<string, CollectionApi>
 
-export type CollectionDefinition = CollectionDef & AccessDef & { name: string }
+// S - схема (zod), N - имя: из них клиент выводит типы документов и коллекций.
+// schema в типе параметра свой (а не Schema из db.ts): иначе z.ZodType<Record...>
+// расширяет вывод до Record<string, unknown> и типы документов теряются.
+type CollectionDefNoSchema = Omit<CollectionDef, 'schema'>
+export type CollectionDefinition<S extends z.ZodType | undefined = z.ZodType | undefined, N extends string = string> = CollectionDefNoSchema &
+  AccessDef & { name: N; schema?: S }
 
-export function defineCollection(name: string, def: CollectionDef & AccessDef = {}): CollectionDefinition {
+export function defineCollection<N extends string, S extends z.ZodType | undefined = undefined>(
+  name: N,
+  def: CollectionDefNoSchema & AccessDef & { schema?: S } = {},
+): CollectionDefinition<S, N> {
   if (typeof name !== 'string' || !/^_?[A-Za-z][\w-]*$/.test(name)) throw new TypeError(`defineCollection: недопустимое имя "${name}"`)
   return { ...def, name }
 }
 
-export type AppConfig = {
-  collections?: CollectionDefinition[] // users - расширение встроенной
-  actions?: ActionDef[]
+export type AppConfig<
+  C extends readonly CollectionDefinition<any, any>[] = CollectionDefinition<any, any>[],
+  A extends readonly ActionDef<any, any, any>[] = ActionDef<any, any, any>[],
+> = {
+  collections?: C // users - расширение встроенной
+  actions?: A
   auth?: Omit<AuthOptions, 'secret' | 'users' | 'mail' | 'fetch' | 'now'>
   mail?: MailOptions
   http?: Omit<HttpOptions, 'access' | 'auth' | 'actions' | 'adminToken' | 'adminApi' | 'superusers' | 'onError'>
@@ -44,7 +55,7 @@ export type AppConfig = {
 
 const CONFIG_KEYS = new Set(['collections', 'actions', 'auth', 'mail', 'http', 'limits', 'db', 'realtime', 'events', 'scheduler', 'admin'])
 
-export function defineConfig(cfg: AppConfig): AppConfig {
+export function defineConfig<C extends readonly CollectionDefinition<any, any>[], A extends readonly ActionDef<any, any, any>[]>(cfg: AppConfig<C, A>): AppConfig<C, A> {
   for (const k of Object.keys(cfg)) if (!CONFIG_KEYS.has(k)) throw new TypeError(`defineConfig: неизвестный раздел "${k}"`)
   const names = new Set<string>()
   for (const c of cfg.collections ?? []) {

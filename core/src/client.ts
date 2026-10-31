@@ -70,6 +70,37 @@ async function sha256b64url(s: string): Promise<string> {
   return b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))))
 }
 
+// ---------- типы из конфига (createClient<typeof config>) ----------
+// Ничего не генерируется: типы выводятся из zod-схем и имён в defineCollection/
+// defineAction; в рантайме это тот же MabaseClient.
+type ZodLike = import('zod').ZodType
+type SchemaOf<D> = D extends { schema?: infer S } ? (S extends ZodLike ? S : never) : never
+
+export type DocBase = { _id: string; _createdAt: number; _updatedAt: number }
+export type DocOf<D> = [SchemaOf<D>] extends [never] ? Doc : DocBase & import('zod').output<SchemaOf<D>>
+export type InsertOf<D> = [SchemaOf<D>] extends [never]
+  ? Record<string, unknown>
+  : Omit<import('zod').output<SchemaOf<D>>, '_id' | '_createdAt' | '_updatedAt'> & { _id?: string }
+
+export type CollectionsOf<C extends readonly { name: string }[]> = {
+  [D in C[number] as D['name']]: CollectionClient<DocOf<D>, InsertOf<D>>
+}
+type ActionInputOf<D> = D extends { input?: infer S } ? (S extends ZodLike ? import('zod').input<S> : undefined) : undefined
+export type ActionMap<A extends readonly { name: string }[]> = { [D in A[number] as D['name']]: ActionInputOf<D> }
+
+export type TypedClient<Config extends { collections?: readonly { name: string }[]; actions?: readonly { name: string }[] }> = Omit<MabaseClient, 'c' | 'action'> & {
+  c: CollectionsOf<NonNullable<Config['collections']>>
+  action<N extends keyof ActionMap<NonNullable<Config['actions']>> & string>(
+    name: N,
+    ...args: ActionMap<NonNullable<Config['actions']>>[N] extends undefined ? [input?: undefined] : [input: ActionMap<NonNullable<Config['actions']>>[N]]
+  ): Promise<any>
+}
+
+export function createClient(url: string, opts?: ClientOptions): MabaseClient
+export function createClient<Config extends { collections?: readonly { name: string }[]; actions?: readonly { name: string }[] }>(
+  url: string,
+  opts?: ClientOptions,
+): TypedClient<Config>
 export function createClient(url: string, opts: ClientOptions = {}): MabaseClient {
   return new MabaseClient(url, opts)
 }
@@ -141,7 +172,7 @@ export class MabaseClient {
     return this.request('POST', `/api/actions/${encodeURIComponent(name)}`, input ?? {})
   }
 
-  live<T extends Doc = Doc>(collection: string, filter: Record<string, unknown> = {}, opts: LiveOptions = {}): Live<T> {
+  live<T extends { _id: string } = Doc>(collection: string, filter: Record<string, unknown> = {}, opts: LiveOptions = {}): Live<T> {
     // Связанные документы меняются отдельно от списка - в живой выборке их пока нет
     if (opts.expand?.length) throw new TypeError('live(): expand пока не поддерживается - связанные документы подтягивайте через find или отдельной live()')
     return new Live<T>(this, collection, filter, opts)
@@ -394,7 +425,7 @@ const query = (filter: unknown, opts: FindOptions = {}) => {
   return s ? `?${s}` : ''
 }
 
-export class CollectionClient<T extends Doc = Doc> {
+export class CollectionClient<T extends { _id: string } = Doc, I = Record<string, unknown>> {
   private base: string
   constructor(
     private mb: MabaseClient,
@@ -422,7 +453,7 @@ export class CollectionClient<T extends Doc = Doc> {
 
   // files: поле-файл -> File (или массив File при many). Поля документа уходят
   // JSON-строками, файлы - частями формы; значение поля-файла ставит сервер.
-  insert(doc: Partial<T> & Record<string, unknown>, opts: { files?: Record<string, File | File[]> } = {}): Promise<T> {
+  insert(doc: I & { _id?: string }, opts: { files?: Record<string, File | File[]> } = {}): Promise<T> {
     if (!opts.files) return this.mb.request('POST', this.base, doc)
     return this.mb.send('POST', this.base, { body: formData(doc, opts.files) })
   }
@@ -619,7 +650,7 @@ type Change = { op: 'added' | 'updated' | 'removed'; doc?: Doc; id?: string }
 // Состояние = чтение REST (на tx) + изменения с большим tx. Пока идёт чтение,
 // изменения копятся в буфере. Новые записи, которые по сортировке позже
 // последней загруженной, не добавляются: их принесёт loadMore.
-export class Live<T extends Doc = Doc> {
+export class Live<T extends { _id: string } = Doc> {
   items: T[] = []
   loaded = false
   readonly subId: string

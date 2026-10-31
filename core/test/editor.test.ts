@@ -59,6 +59,9 @@ describe('типы для редактора', () => {
       'type Rules',
       'files?: Record<string, FileField>',
       'origin: Origin',
+      "declare module 'mabase/client'",
+      'createClient<Config',
+      'TypedClient',
     ]) {
       expect(main).toContain(name)
     }

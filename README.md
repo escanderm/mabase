@@ -594,6 +594,36 @@ mb.on('typing', ({ from, data }) => {})
 
 Ошибки - `MabaseError` с полями `code` и `message`.
 
+### Типы без генерации кода
+
+`createClient<typeof config>` выводит типы из zod-схем конфига: коллекции,
+поля документов и данные действий. Ничего генерировать не нужно.
+
+```ts
+// client.ts - тот же конфиг, что у сервера, только типом
+import type config from '../mabase.config'
+import { createClient } from 'mabase/client'
+
+const mb = createClient<typeof config>(location.origin)
+
+const msgs = await mb.c.messages.find({ roomId })   // msgs: { _id, text, roomId, ... }[]
+await mb.c.messages.insert({ text: 'привет', roomId })  // не хватит поля - ошибка типов
+await mb.action('invite', { roomId, email })        // вход действия проверяется
+```
+
+- В браузере `mabase/client` - это `/api/client.js` из бинарника. Подключите
+  import map (или алиас в сборщике):
+
+  ```html
+  <script type="importmap">
+    { "imports": { "mabase/client": "/api/client.js" } }
+  </script>
+  ```
+
+- Типы `mabase/client` берутся из `mb_data/types.d.ts`, который бинарник пишет
+  при старте (см. «Проект в коде»).
+- Без параметра типа `createClient(url)` - обычный клиент с `Doc`, как раньше.
+
 ## HTTP API
 
 | Путь | Что |

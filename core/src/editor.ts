@@ -81,12 +81,16 @@ declare module 'mabase' {
     afterDelete?: (ctx: Omit<HookCtx, 'signal' | 'depth'> & { prev: Doc }) => unknown
   }
 
-  export type CollectionDefinition = { name: string } & Record<string, unknown>
+  type CollectionDefNoSchema = { [key: string]: unknown }
+  export type CollectionDefinition<S extends ZodType | undefined = ZodType | undefined, N extends string = string> = CollectionDefNoSchema & {
+    name: N
+    schema?: S
+  }
 
-  export function defineCollection(
-    name: string,
+  export function defineCollection<N extends string, S extends ZodType | undefined = undefined>(
+    name: N,
     def?: {
-      schema?: ZodType
+      schema?: S
       indexes?: string[]
       owner?: string
       fields?: Fields
@@ -95,7 +99,7 @@ declare module 'mabase' {
       relations?: Record<string, Relation>
       files?: Record<string, FileField>
     },
-  ): CollectionDefinition
+  ): CollectionDefinition<S, N>
 
   export type ActionCtx<I = any> = {
     input: I
@@ -104,11 +108,17 @@ declare module 'mabase' {
     emit: (event: string, data: unknown, opts?: { after?: number | string; key?: string }) => void
     signal: AbortSignal
   }
-  export type ActionDef = { name: string; input?: ZodType; public?: boolean; handler: (ctx: any) => unknown }
-  export function defineAction<I = any>(
-    name: string,
-    def: { input?: ZodType; public?: boolean; handler: (ctx: ActionCtx<I>) => unknown | Promise<unknown> },
-  ): ActionDef
+  export type InputOf<S> = S extends ZodType ? import('./types/zod/index.js').output<S> : undefined
+  export type ActionDef<I = unknown, N extends string = string, S extends ZodType = ZodType> = {
+    name: N
+    input?: S
+    public?: boolean
+    handler: (ctx: any) => unknown
+  }
+  export function defineAction<N extends string, S extends ZodType | undefined = undefined>(
+    name: N,
+    def: { input?: S; public?: boolean; handler: (ctx: ActionCtx<InputOf<S>>) => unknown | Promise<unknown> },
+  ): ActionDef<InputOf<S>, N, S extends ZodType ? S : ZodType>
 
   export type MailMessage = { to: string; subject: string; text: string; html?: string }
   export const mail: { send(msg: MailMessage): Promise<void> }
@@ -134,10 +144,12 @@ declare module 'mabase' {
   /** События записей и свои: <коллекция>.created | updated | deleted, emit('order.paid') */
   export function on(event: string, fn: EventHandler): void
 
-  export type AppConfig = Record<string, unknown>
-  export function defineConfig(cfg: {
-    collections?: CollectionDefinition[]
-    actions?: ActionDef[]
+  export type AppConfig<
+    C extends readonly CollectionDefinition<any, any>[] = CollectionDefinition<any, any>[],
+    A extends readonly ActionDef<any, any, any>[] = ActionDef<any, any, any>[],
+  > = {
+    collections?: C
+    actions?: A
     auth?: Record<string, unknown>
     mail?: Record<string, unknown>
     http?: Record<string, unknown>
@@ -147,7 +159,10 @@ declare module 'mabase' {
     events?: Record<string, Record<string, unknown>>
     scheduler?: Record<string, unknown>
     admin?: Record<string, unknown>
-  }): AppConfig
+  }
+  export function defineConfig<C extends readonly CollectionDefinition<any, any>[], A extends readonly ActionDef<any, any, any>[]>(
+    cfg: AppConfig<C, A>,
+  ): AppConfig<C, A>
 
   export type ActionErrorCode =
     | 'bad_request'
@@ -166,6 +181,113 @@ declare module 'mabase' {
   }
 
   export type ClientLimits = { defaultLimit: number; maxLimit: number; maxScanned: number; maxRegexLength: number }
+}
+
+// ---------- клиент для браузера ----------
+// Типы SDK. В браузере он подключается с сервера:
+//   import { createClient } from '/api/client.js'
+// а типы берутся отсюда: createClient<typeof config> выводит коллекции и
+// действия из zod-схем конфига. Если нужен один импорт - добавьте в проект
+// файл client.d.ts:
+//   declare module '/api/client.js' { export * from 'mabase/client' }
+
+declare module 'mabase/client' {
+  export type Doc = { _id: string; _createdAt: number; _updatedAt: number; [field: string]: any }
+  export type Query = Record<string, unknown>
+  export type Update = {
+    $set?: Record<string, unknown>
+    $unset?: Record<string, unknown>
+    $inc?: Record<string, number>
+    $push?: Record<string, unknown>
+    $pull?: Record<string, unknown>
+  }
+  export type FindOptions = { sort?: Record<string, 1 | -1>; limit?: number; fields?: string[]; expand?: string[] }
+  export type User = { id: string; email?: string; roles?: string[]; [field: string]: unknown }
+
+  type ZodLike = import('./types/zod/index.js').ZodType
+  type SchemaOf<D> = D extends { schema?: infer S } ? (S extends ZodLike ? S : never) : never
+  export type DocOf<D> = [SchemaOf<D>] extends [never] ? Doc : { _id: string; _createdAt: number; _updatedAt: number } & import('./types/zod/index.js').output<SchemaOf<D>>
+  export type InsertOf<D> = [SchemaOf<D>] extends [never]
+    ? Record<string, unknown>
+    : Omit<import('./types/zod/index.js').output<SchemaOf<D>>, '_id' | '_createdAt' | '_updatedAt'> & { _id?: string }
+  export type CollectionsOf<C extends readonly { name: string }[]> = {
+    [D in C[number] as D['name']]: CollectionClient<DocOf<D>, InsertOf<D>>
+  }
+  type ActionInputOf<D> = D extends { input?: infer S } ? (S extends ZodLike ? import('./types/zod/index.js').input<S> : undefined) : undefined
+  export type ActionMap<A extends readonly { name: string }[]> = { [D in A[number] as D['name']]: ActionInputOf<D> }
+
+  export interface CollectionClient<T = Doc, I = Record<string, unknown>> {
+    find(filter?: Query, opts?: FindOptions): Promise<T[]>
+    findOne(filter?: Query, opts?: FindOptions): Promise<T | null>
+    count(filter?: Query): Promise<number>
+    get(id: string, opts?: { fields?: string[]; expand?: string[] }): Promise<T>
+    insert(doc: I & { _id?: string }, opts?: { files?: Record<string, File | File[]> }): Promise<T>
+    update(id: string, update: Update, opts?: { files?: Record<string, File | File[]> }): Promise<T>
+    remove(id: string): Promise<void>
+  }
+  export interface Live<T = Doc> {
+    items: T[]
+    loaded: boolean
+    subscribe(fn: (items: T[]) => void): () => void
+    on(event: 'change' | 'reset' | 'revoked' | 'error', fn: (arg: any) => void): () => void
+    loadMore(n: number): Promise<number>
+    close(): void
+  }
+  export type ActionErrorCode = 'bad_request' | 'unauthorized' | 'forbidden' | 'not_found' | 'conflict' | 'invalid_credentials' | 'too_many_requests' | 'too_large' | 'unavailable'
+  export class MabaseError extends Error {
+    constructor(code: string, message: string, status?: number, details?: unknown)
+    readonly code: string
+    readonly status: number
+    readonly details?: unknown
+  }
+  export type ClientOptions = {
+    storage?: { getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void }
+    sessionStorage?: { getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void }
+    fetch?: typeof fetch
+    WebSocket?: unknown
+    authphoneUrl?: string
+    refreshBeforeMs?: number
+    reconnectMs?: { min: number; max: number }
+    pingMs?: number
+  }
+  export interface MabaseClient {
+    readonly url: string
+    readonly c: Record<string, CollectionClient>
+    readonly auth: {
+      user: User | null
+      session: { user: User; accessToken: string; refreshToken: string; accessExpiresAt: number } | null
+      register(input: { email?: string; phone?: string; password?: string; data?: Record<string, unknown> }): Promise<User>
+      login(input: { email?: string; phone?: string; password?: string; code?: string }): Promise<User>
+      logout(): Promise<void>
+      restore(): Promise<User | null>
+      onChange(fn: (user: User | null) => void): () => void
+      setPassword(oldPassword: string, newPassword: string): Promise<void>
+    }
+    action<R = any>(name: string, input?: unknown): Promise<R>
+    live<T = Doc>(collection: string, filter?: Query, opts?: FindOptions): Live<T>
+    emit(event: string, data: unknown): void
+    on(event: string, fn: (arg: any) => void): () => void
+    fileUrl(id: string): string
+    request<R = any>(method: string, path: string, body?: unknown): Promise<R>
+    close(): void
+  }
+  export type TypedClient<
+    Config extends { collections?: readonly { name: string }[]; actions?: readonly { name: string }[] },
+  > = Omit<MabaseClient, 'c' | 'action'> & {
+    c: CollectionsOf<NonNullable<Config['collections']>>
+    action<N extends keyof ActionMap<NonNullable<Config['actions']>> & string>(
+      name: N,
+      ...args: ActionMap<NonNullable<Config['actions']>>[N] extends undefined
+        ? [input?: undefined]
+        : [input: ActionMap<NonNullable<Config['actions']>>[N]]
+    ): Promise<any>
+  }
+
+  export function createClient(url: string, opts?: ClientOptions): MabaseClient
+  export function createClient<Config extends { collections?: readonly { name: string }[]; actions?: readonly { name: string }[] }>(
+    url: string,
+    opts?: ClientOptions,
+  ): TypedClient<Config>
 }
 `
 
