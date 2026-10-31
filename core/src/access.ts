@@ -422,7 +422,7 @@ export class ClientCollection {
       const saved = await db.transaction(async (tx) => {
         await this.s.check(this.name, 'create', { doc: structuredClone(doc), db: tx.c })
         return tx.c[this.name]!.insert(doc as Record<string, unknown>)
-      }, { user: this.s.user })
+      }, { user: this.s.user, origin: 'api' })
       return this.s.strip(this.name, saved)
     })
   }
@@ -440,7 +440,7 @@ export class ClientCollection {
         const after = applyUpdate(before, update as Update)
         await this.s.check(this.name, 'update', { before, after, db: tx.c })
         return tx.c[this.name]!.update(id, update as Update)
-      }, { user: this.s.user })
+      }, { user: this.s.user, origin: 'api' })
       return this.s.strip(this.name, saved)
     })
   }
@@ -454,7 +454,7 @@ export class ClientCollection {
         if (!before) throw new ActionError('not_found', 'Запись не найдена')
         await this.s.check(this.name, 'delete', { before, db: tx.c })
         await tx.c[this.name]!.remove(id)
-      }, { user: this.s.user })
+      }, { user: this.s.user, origin: 'api' })
     })
   }
 }

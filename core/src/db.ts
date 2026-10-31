@@ -28,14 +28,18 @@ export type { Explain, FindOptions } from './planner'
 // Кто пишет: пользователь запроса или null (сервер, сид, системные задачи).
 export type User = { readonly id: string; readonly roles?: readonly string[] }
 
-type BeforeCtx = { db: Db; signal: AbortSignal; depth: number; user: User | null }
+// Кто вызвал запись (design.md §9): клиент, действие, хук, сид или сам сервер.
+// Хук видит origin и может не реагировать на свои же изменения: origin === 'hook'.
+export type Origin = 'api' | 'action' | 'hook' | 'system' | 'seed'
+
+type BeforeCtx = { db: Db; signal: AbortSignal; depth: number; user: User | null; origin: Origin }
 export type Hooks = {
   beforeCreate?: (ctx: BeforeCtx & { doc: Doc }) => unknown
   beforeUpdate?: (ctx: BeforeCtx & { prev: Doc; next: Doc }) => unknown
   beforeDelete?: (ctx: BeforeCtx & { prev: Doc }) => unknown
-  afterCreate?: (ctx: { db: Db; doc: Doc; user: User | null }) => unknown
-  afterUpdate?: (ctx: { db: Db; prev: Doc; doc: Doc; user: User | null }) => unknown
-  afterDelete?: (ctx: { db: Db; prev: Doc; user: User | null }) => unknown
+  afterCreate?: (ctx: { db: Db; doc: Doc; user: User | null; origin: Origin }) => unknown
+  afterUpdate?: (ctx: { db: Db; prev: Doc; doc: Doc; user: User | null; origin: Origin }) => unknown
+  afterDelete?: (ctx: { db: Db; prev: Doc; user: User | null; origin: Origin }) => unknown
 }
 // Связь: поле хранит _id документа другой коллекции (many - массив _id).
 // При записи проверяется, что такие документы есть. При удалении документа,
@@ -66,7 +70,7 @@ export type TxEvent = { event: string; data: unknown }
 // changes - те же операции с прежней версией документа: подпискам нужно
 // знать, была ли запись видна до изменения (design.md §12).
 export type Change = { c: string; id: string; prev: Doc | null; doc: Doc | null }
-export type CommitInfo = { tx: number; ops: LogOp[]; holdMs: number; events: readonly TxEvent[]; changes: readonly Change[]; user: User | null }
+export type CommitInfo = { tx: number; ops: LogOp[]; holdMs: number; events: readonly TxEvent[]; changes: readonly Change[]; user: User | null; origin: Origin }
 export type EmitOptions = { after?: number | string; key?: string }
 export type HookErrorInfo = { where: string; collection?: string }
 
@@ -87,6 +91,8 @@ class Tx {
   state: TxState = 'open'
   baseDepth = 0 // глубина, унаследованная от after*-хука (вне транзакции)
   afterDepth = 0 // до какой глубины дошли after*-хуки этой транзакции
+  origin: Origin = 'system' // кто вызвал транзакцию
+  baseOrigin: Origin = 'system' // origin из after*/runAs, унаследованный новой транзакцией
   overlay = new Map<string, Map<string, Doc | null>>() // null = удалён в транзакции
   after: Array<{ collection: string; run: () => unknown }> = []
   events: TxEvent[] = []
@@ -100,7 +106,7 @@ class Tx {
   fail: (err: unknown) => void = () => {}
 }
 
-type Store = { tx: Tx | null; depth: number }
+type Store = { tx: Tx | null; depth: number; origin: Origin }
 
 export type TxApi = {
   c: Record<string, CollectionApi>
@@ -381,7 +387,7 @@ export class Db {
   // ---------- транзакции ----------
 
   // user - кто пишет; доходит до хуков. Вложенная транзакция берёт его у внешней.
-  transaction<T>(fn: (tx: TxApi) => T | Promise<T>, opts: { user?: User | null } = {}): Promise<T> {
+  transaction<T>(fn: (tx: TxApi) => T | Promise<T>, opts: { user?: User | null; origin?: Origin } = {}): Promise<T> {
     const store = this.als.getStore()
     if (store?.tx) {
       // вложенная транзакция присоединяется к текущей
@@ -393,10 +399,12 @@ export class Db {
     // глубина переезжает в новую транзакцию, иначе цикл after -> запись -> after
     // не ограничен ничем (design.md §9).
     tx.baseDepth = store?.depth ?? 0
+    tx.baseOrigin = store?.origin ?? 'system'
+    tx.origin = opts.origin ?? tx.baseOrigin
     tx.user = opts.user ? Object.freeze({ ...opts.user }) : null
     return new Promise<T>((resolve, reject) => {
       tx.fail = reject
-      this.als.run({ tx, depth: tx.baseDepth }, () => {
+      this.als.run({ tx, depth: tx.baseDepth, origin: tx.origin }, () => {
         Promise.resolve()
           .then(() => fn(this.txApi(tx)))
           .then(
@@ -529,7 +537,7 @@ export class Db {
       tx.state = 'committed'
       const holdMs = this.holdMs(tx)
       tx.release?.()
-      if (events.length) this.notify({ tx: this.lastTx, ops, holdMs, events, changes: [], user: tx.user })
+      if (events.length) this.notify({ tx: this.lastTx, ops, holdMs, events, changes: [], user: tx.user, origin: tx.origin })
       return
     }
     if (this.readOnly) {
@@ -560,10 +568,10 @@ export class Db {
     const holdMs = this.holdMs(tx)
     tx.release()
 
-    this.notify({ tx: txNo, ops, holdMs, events, changes, user: tx.user })
+    this.notify({ tx: txNo, ops, holdMs, events, changes, user: tx.user, origin: tx.origin })
     // after* - вне контекста завершённой транзакции, но с её глубиной:
     // запись из after* - новая транзакция, и цепочка ограничена maxDepth.
-    if (tx.after.length) this.als.run({ tx: null, depth: tx.afterDepth }, () => setTimeout(() => this.runAfter(tx), 0))
+    if (tx.after.length) this.als.run({ tx: null, depth: tx.afterDepth, origin: 'hook' }, () => setTimeout(() => this.runAfter(tx), 0))
     this.maybeCompact()
   }
 
@@ -591,7 +599,9 @@ export class Db {
   // Ошибка в before* или превышение глубины отменяет всю транзакцию,
   // даже если код действия поймает исключение.
   private async runBefore<T>(tx: Tx, depth: number, f: () => T | Promise<T>): Promise<T> {
-    return this.als.run({ tx, depth: depth + 1 }, async () => {
+    // Запись, сделанная хуком, помечается origin: 'hook' - следующий хук поймёт,
+    // что это его собственное изменение.
+    return this.als.run({ tx, depth: depth + 1, origin: 'hook' }, async () => {
       try {
         return await f()
       } catch (err) {
@@ -599,6 +609,19 @@ export class Db {
         throw err
       }
     })
+  }
+
+  // Origin текущей записи: у корневой транзакции - её собственный, внутри
+  // before*/after*-хука - 'hook'.
+  private originOf(tx: Tx): Origin {
+    const store = this.als.getStore()
+    return store?.tx === tx ? store.origin : tx.baseOrigin
+  }
+
+  // Выполнить блок с другим origin: сид, импорт. Транзакции внутри наследуют.
+  runAs<T>(origin: Origin, fn: () => T | Promise<T>): Promise<T> {
+    const store = this.als.getStore()
+    return this.als.run({ tx: null, depth: store?.depth ?? 0, origin }, async () => fn())
   }
 
   private depthOf(tx: Tx): number {
@@ -644,8 +667,11 @@ export class Db {
     const hooks = this.defs.get(c)?.hooks
     if (hooks?.beforeCreate) {
       const h = hooks.beforeCreate
+      // origin считаем до runBefore: внутри контекста хука он уже 'hook',
+      // а хук должен видеть, кто вызвал саму запись.
+      const origin = this.originOf(tx)
       const r = await this.runBefore(tx, depth, () =>
-        h({ doc: clone(doc), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user }),
+        h({ doc: clone(doc), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user, origin }),
       )
       if (r && typeof r === 'object') doc = { ...clone(r as object), _id: id, _createdAt: now, _updatedAt: now }
     }
@@ -665,8 +691,9 @@ export class Db {
     if (hooks?.afterCreate) {
       const h = hooks.afterCreate
       const saved = clone(doc)
+      const origin = this.originOf(tx)
       tx.afterDepth = Math.max(tx.afterDepth, depth + 1)
-      tx.after.push({ collection: c, run: () => h({ doc: saved, db: this, user: tx.user }) })
+      tx.after.push({ collection: c, run: () => h({ doc: saved, db: this, user: tx.user, origin }) })
     }
     return clone(doc)
   }
@@ -682,8 +709,9 @@ export class Db {
     const hooks = this.defs.get(c)?.hooks
     if (hooks?.beforeUpdate) {
       const h = hooks.beforeUpdate
+      const origin = this.originOf(tx)
       const r = await this.runBefore(tx, depth, () =>
-        h({ prev: clone(prev), next: clone(next), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user }),
+        h({ prev: clone(prev), next: clone(next), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user, origin }),
       )
       if (r && typeof r === 'object') {
         next = { ...clone(r as object), _id: id, _createdAt: prev._createdAt, _updatedAt: now }
@@ -702,8 +730,9 @@ export class Db {
       const h = hooks.afterUpdate
       const p = clone(prev)
       const d = clone(next)
+      const origin = this.originOf(tx)
       tx.afterDepth = Math.max(tx.afterDepth, depth + 1)
-      tx.after.push({ collection: c, run: () => h({ prev: p, doc: d, db: this, user: tx.user }) })
+      tx.after.push({ collection: c, run: () => h({ prev: p, doc: d, db: this, user: tx.user, origin }) })
     }
     return clone(next)
   }
@@ -717,8 +746,9 @@ export class Db {
     const hooks = this.defs.get(c)?.hooks
     if (hooks?.beforeDelete) {
       const h = hooks.beforeDelete
+      const origin = this.originOf(tx)
       await this.runBefore(tx, depth, () =>
-        h({ prev: clone(prev), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user }),
+        h({ prev: clone(prev), db: this, signal: tx.abort.signal, depth: depth + 1, user: tx.user, origin }),
       )
     }
     this.ensureOpen(tx)
@@ -734,8 +764,9 @@ export class Db {
     if (hooks?.afterDelete) {
       const h = hooks.afterDelete
       const p = clone(prev)
+      const origin = this.originOf(tx)
       tx.afterDepth = Math.max(tx.afterDepth, depth + 1)
-      tx.after.push({ collection: c, run: () => h({ prev: p, db: this, user: tx.user }) })
+      tx.after.push({ collection: c, run: () => h({ prev: p, db: this, user: tx.user, origin }) })
     }
   }
 

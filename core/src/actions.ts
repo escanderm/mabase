@@ -131,7 +131,7 @@ export class Actions {
         assertJson(result)
         return result === undefined ? null : JSON.parse(JSON.stringify(result))
       },
-      { user },
+      { user, origin: 'action' },
     )
   }
 

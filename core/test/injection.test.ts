@@ -223,6 +223,40 @@ describe('схема и события', () => {
   })
 })
 
+describe('origin хуков', () => {
+  test('164. хук видит, кто вызвал запись, и может пропустить свои же изменения', async () => {
+    const db = await openDb({ dir: tmpDir('origin'), compactMinBytes: 0 })
+    const seen: string[] = []
+    db.collection('x', {
+      hooks: {
+        afterUpdate: async ({ doc, db, origin }) => {
+          seen.push(origin)
+          if (origin === 'hook') return // своё изменение - дальше не реагируем
+          await db.c.x!.update(doc._id, { $inc: { n: 1 } })
+        },
+      },
+    })
+    const d = await db.c.x!.insert({ n: 0 })
+    await db.c.x!.update(d._id, { $set: { a: 1 } })
+    await waitFor(() => seen.length >= 2, 2000)
+    expect(seen).toEqual(['system', 'hook'])
+    expect(db.peek('x', d._id)!.n).toBe(1) // цепочка остановилась на своей же записи
+    await db.close()
+  })
+
+  test('165. клиент даёт origin api, сид - seed, действие - action', async () => {
+    const db = await openDb({ dir: tmpDir('origin2'), compactMinBytes: 0 })
+    const seen: string[] = []
+    db.collection('y', { hooks: { beforeCreate: ({ origin }) => void seen.push(origin) } })
+    const access = new Access(db, { y: { rules: { create: () => true } } })
+
+    await access.forUser(null).c.y!.insert({ a: 1 })
+    await db.runAs('seed', () => db.c.y!.insert({ a: 2 }))
+    expect(seen).toEqual(['api', 'seed'])
+    await db.close()
+  })
+})
+
 describe('$set через не-объект', () => {
   test('150. вложенный путь через скаляр и через массив - ошибка, поле не теряется', async () => {
     const db = await openDb({ dir: tmpDir('set'), compactMinBytes: 0 })

@@ -388,6 +388,11 @@ export default defineConfig({ collections: [orders], actions: [pay], realtime: t
 | `beforeDelete({ prev, user, db })` | до удаления | ошибка запрещает удаление |
 | `afterCreate`, `afterUpdate`, `afterDelete` | после сохранения | побочные действия; ошибка не отменяет запись |
 
+В контексте хука есть `origin` - кто вызвал запись: `api` (клиент), `action`,
+`hook` (запись из другого хука), `seed`, `system`. Хук, который сам пишет в
+базу, получит на своё изменение `origin: 'hook'` и может его пропустить -
+это дешевле, чем городить флаг в документе.
+
 Хуки коллекций задаются в `defineCollection`. Обработчики событий - в
 `mb_hooks/*.ts`:
 

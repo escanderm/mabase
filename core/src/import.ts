@@ -23,7 +23,7 @@ export async function importNdjson(db: Db, collection: string, text: string): Pr
           inserted++
         }
       }
-    })
+    }, { origin: 'seed' })
   }
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i]!.trim()) continue

@@ -175,7 +175,8 @@ export async function run(argv: string[], out: (line: string) => void = console.
       api.bindMailer(app.mail)
       try {
         const t = performance.now()
-        await seed!.seed({ db: app.db.c, auth: app.auth })
+        // Сид идёт мимо правил, но хуки работают и видят origin: 'seed'.
+        await app.db.runAs('seed', () => seed!.seed({ db: app.db.c, auth: app.auth }))
         out(`Сид выполнен за ${Math.round(performance.now() - t)} мс`)
       } finally {
         api.bindMailer(null)
