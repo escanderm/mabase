@@ -166,7 +166,7 @@ MaBase 0.2.8: настройки (слева - значение, справа - 
 | `MABASE_DIR`, `MABASE_PORT`, `MABASE_HOST` | папка данных, порт, адрес |
 | `MABASE_PUBLIC`, `MABASE_SERVER_URL`, `MABASE_CORS` | статика, публичный адрес, источники CORS |
 | `MABASE_SECRET` | ключ подписи токенов вместо `mb_data/secret.key` (не короче 32) |
-| `MABASE_S3_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_ENDPOINT`, `_PREFIX`, `_PATH_STYLE`, `_SESSION_TOKEN` | файлы в S3 |
+| `MABASE_S3_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_ENDPOINT`, `_PREFIX`, `_PATH_STYLE`, `_SESSION_TOKEN` | файлы в S3; `_PATH_STYLE=1` - только MinIO на IP, облака на домене - по умолчанию virtual-host |
 | `MABASE_SMTP_HOST`, `_PORT`, `_USER`, `_PASS`, `_SECURE`, `MABASE_MAIL_FROM` | почта |
 | `MABASE_APP_URL`, `MABASE_GOOGLE_ID/SECRET`, `MABASE_GITHUB_ID/SECRET` | вход |
 | `MABASE_UPDATE_URL` | свой сервер обновлений вместо GitHub |
@@ -332,13 +332,19 @@ export default defineConfig({
       secretAccessKey: process.env.S3_SECRET!,
       endpoint: 'https://storage.yandexcloud.net', // нет - AWS
       prefix: 'myapp',            // необязательно: общий префикс ключей
-      forcePathStyle: true,       // для MinIO и большинства S3-совместимых
+      // forcePathStyle: true      // только для MinIO на IP:порт; облака на
+                                   // домене работают виртуальным хостом по умолчанию
     },
   },
 })
 ```
 
 - Запросы к S3 подписываются AWS Signature V4 (своими руками, без зависимостей).
+- По умолчанию: адрес-IP или `localhost` (MinIO) - path-style, домен (AWS,
+  Beget, R2, Яндекс) - virtual-host. Проверено на Beget (`ru1`,
+  `s3.ru1.storage.beget.cloud`): загрузка, отдача, Range, перенос в обе
+  стороны, уборка. На path-style с `ru1` Beget рвёт соединение - поэтому
+  умолчание именно такое.
 - Ключ объекта: `[prefix/]<коллекция>/<запись>/<id файла>-<имя>`.
 - Удаление записи удаляет и объекты в S3.
 - **Переключили хранилище - перенесите файлы:**

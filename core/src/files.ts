@@ -128,6 +128,8 @@ export type S3Options = {
   sessionToken?: string // временные ключи
 }
 
+const isIpOrLocalhost = (host: string) => host === 'localhost' || /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.startsWith('[')
+
 const sha256hex = (data: string | Uint8Array) => createHash('sha256').update(data).digest('hex')
 const hmac = (key: string | Buffer, data: string) => createHmac('sha256', key).update(data).digest()
 const encodeRfc3986 = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
@@ -136,13 +138,17 @@ const encodeRfc3986 = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, (
 // AWS Signature V4. Работает с AWS, MinIO, Cloudflare R2 и Яндексом.
 export class S3Storage implements FileStorage {
   private endpoint: URL
-  private pathStyle: boolean
+  // public: по нему видно, какой стиль выбрался (и это проверяет тест)
+  readonly pathStyle: boolean
 
   constructor(readonly opts: S3Options) {
     const missing = ['bucket', 'region', 'accessKeyId', 'secretAccessKey'].filter((k) => !(opts as any)[k])
     if (missing.length) throw new TypeError(`storage.s3: нужны ${missing.join(', ')}`)
     this.endpoint = new URL(opts.endpoint ?? `https://s3.${opts.region}.amazonaws.com`)
-    this.pathStyle = opts.forcePathStyle ?? !/(^|\.)amazonaws\.com$/.test(this.endpoint.hostname)
+    // Умолчание: path-style только для адреса-IP (MinIO на http://1.2.3.4:9000,
+    // localhost). Облака на домене (AWS, Beget, R2, Яндекс) - virtual-host:
+    // Beget на path-style с регионом ru1 рвёт соединение.
+    this.pathStyle = opts.forcePathStyle ?? isIpOrLocalhost(this.endpoint.hostname)
   }
 
   key(meta: FileMeta): string {

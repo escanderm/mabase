@@ -82,5 +82,13 @@ describe('файлы в S3', () => {
     expect(s3.key(meta)).toBe('uploads/docs/r1/f1-фото_1.png')
     const plain = new S3Storage({ bucket: 'b', region: 'ru-central1', accessKeyId: KEY, secretAccessKey: SECRET })
     expect(plain.key(meta)).toBe('docs/r1/f1-фото_1.png')
+
+    // умолчание: IP/localhost - path-style (MinIO), домен - virtual-host (облака);
+    // Beget на path-style + ru1 рвёт соединение, поэтому это важно
+    const minio = new S3Storage({ bucket: 'b', region: 'ru1', accessKeyId: KEY, secretAccessKey: SECRET, endpoint: 'http://127.0.0.1:9000' })
+    expect(minio.pathStyle).toBe(true)
+    const cloud = new S3Storage({ bucket: 'b', region: 'ru1', accessKeyId: KEY, secretAccessKey: SECRET, endpoint: 'https://s3.ru1.storage.beget.cloud' })
+    expect(cloud.pathStyle).toBe(false)
+    expect(new S3Storage({ bucket: 'b', region: 'ru1', accessKeyId: KEY, secretAccessKey: SECRET, endpoint: 'https://s3.example.test', forcePathStyle: true }).pathStyle).toBe(true)
   })
 })
