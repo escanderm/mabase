@@ -735,6 +735,7 @@ await mb.action('invite', { roomId, email })        // вход действия
 | Команда | Что делает |
 |---|---|
 | `mabase serve [--port 8090] [--host 0.0.0.0] [--dev]` | запустить сервер; `--dev` - предупреждать о забытом `dependsOn` |
+| `mabase files migrate --from local\|s3 --to local\|s3 [--dry-run]` | перенести файлы между хранилищами |
 | `mabase seed` | выполнить `seed.ts` (сервер остановлен) |
 | `mabase migrate` | применить миграции из `mb_migrations/` (сервер остановлен) |
 | `mabase backup <папка>` | бэкап, в том числе на работающем сервере |
@@ -831,6 +832,7 @@ design.md  решения и причины
 cd core && bun install
 bun run test        # все тесты
 bun run typecheck   # tsc --noEmit: strict + noUncheckedIndexedAccess
+bun bench/realtime.ts 1000 10  # цена dependsOn: 1000 подписок, 10 пользователей
 bun run build       # core/dist/mabase под эту машину
 bun run release     # архивы под все платформы и checksums.txt
 ```

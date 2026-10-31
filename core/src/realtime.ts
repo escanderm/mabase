@@ -92,6 +92,9 @@ export class Conn {
   private token: string | null = null
   private timers: Array<ReturnType<typeof setTimeout>> = []
   private sent: number[] = [] // время клиентских событий за последнюю секунду
+  // Правило list на транзакцию: подписка на 100 коллекций/фильтров одного
+  // соединения не должна считать одно и то же правило 100 раз.
+  ruleCache?: Map<string, { tx: number; rule: Query }>
   private queue: Promise<void> = Promise.resolve() // сообщения клиента - по порядку
   private pending = 0 // сколько сообщений уже в очереди на обработку
 
@@ -318,6 +321,18 @@ export class Realtime {
     this.opts.tail?.publish('ws', { op: 'close', userId, conns: this.conns.size })
   }
 
+  // Правило для подписки: кэш соединения, пока не прошёл коммит (tx тот же).
+  // После коммита tx другой - правило считается заново, свежим.
+  private async ruleNow(c: Conn, collection: string): Promise<Query> {
+    const tx = this.db.lastTx
+    const hit = c.ruleCache?.get(collection)
+    if (hit && hit.tx === tx) return hit.rule
+    const rule = await c.session!.ruleFilter(collection, 'list', this.db.c)
+    if (!c.ruleCache) c.ruleCache = new Map()
+    c.ruleCache.set(collection, { tx, rule })
+    return rule
+  }
+
   async subscribe(c: Conn, msg: any): Promise<void> {
     const { id, collection } = msg
     const filter = msg.filter ?? {}
@@ -328,7 +343,7 @@ export class Realtime {
     const session: ClientSession = c.session!
     session.checkFilter(collection, filter)
     const before = this.db.lastTx
-    const rule = await session.ruleFilter(collection, 'list', this.db.c)
+    const rule = await this.ruleNow(c, collection)
     const sub: Sub = { id, conn: c, collection, filter, rule, match: compileQuery(and(rule, filter)) }
     c.subs.set(id, sub)
     let set = this.byCollection.get(collection)
@@ -348,12 +363,23 @@ export class Realtime {
   }
 
   // Пересчитать фильтр правила. Изменился - reset; правило больше не пускает - revoked.
+  // Правило зависит от пользователя и базы, но не от подписки: на 1000 подписок
+  // одного пользователя считается один раз. Поэтому memo на вызов, а не
+  // ruleFilter(..., db.c) на каждую подписку (тот обходит кэш сессии, чтобы
+  // видеть свежие данные, - здесь свежесть даёт один расчёт на пользователя).
   async recheck(subs: Sub[], tx: number, opts: { silent?: boolean } = {}): Promise<void> {
+    const memo = new Map<string, Promise<Query>>()
+    const ruleFor = (s: Sub): Promise<Query> => {
+      const key = `${s.collection}\u0000${s.conn.user?.id ?? ''}`
+      let p = memo.get(key)
+      if (!p) memo.set(key, (p = s.conn.session!.ruleFilter(s.collection, 'list', this.db.c)))
+      return p
+    }
     for (const s of subs) {
       if (s.conn.subs.get(s.id) !== s) continue
       let rule: Query
       try {
-        rule = await s.conn.session!.ruleFilter(s.collection, 'list', this.db.c)
+        rule = await ruleFor(s)
       } catch (err) {
         if (!(err instanceof ActionError)) this.opts.onError(err, `realtime: правило ${s.collection}.list`)
         this.unsubscribe(s.conn, s.id)
