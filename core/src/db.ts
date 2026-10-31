@@ -85,6 +85,8 @@ type TxState = 'open' | 'committing' | 'committed' | 'aborted'
 
 class Tx {
   state: TxState = 'open'
+  baseDepth = 0 // глубина, унаследованная от after*-хука (вне транзакции)
+  afterDepth = 0 // до какой глубины дошли after*-хуки этой транзакции
   overlay = new Map<string, Map<string, Doc | null>>() // null = удалён в транзакции
   after: Array<{ collection: string; run: () => unknown }> = []
   events: TxEvent[] = []
@@ -98,7 +100,7 @@ class Tx {
   fail: (err: unknown) => void = () => {}
 }
 
-type Store = { tx: Tx; depth: number }
+type Store = { tx: Tx | null; depth: number }
 
 export type TxApi = {
   c: Record<string, CollectionApi>
@@ -381,16 +383,20 @@ export class Db {
   // user - кто пишет; доходит до хуков. Вложенная транзакция берёт его у внешней.
   transaction<T>(fn: (tx: TxApi) => T | Promise<T>, opts: { user?: User | null } = {}): Promise<T> {
     const store = this.als.getStore()
-    if (store) {
+    if (store?.tx) {
       // вложенная транзакция присоединяется к текущей
       this.ensureOpen(store.tx)
       return Promise.resolve().then(() => fn(this.txApi(store.tx)))
     }
     const tx = new Tx()
+    // after*-хук работает вне транзакции, но его запись - продолжение цепочки:
+    // глубина переезжает в новую транзакцию, иначе цикл after -> запись -> after
+    // не ограничен ничем (design.md §9).
+    tx.baseDepth = store?.depth ?? 0
     tx.user = opts.user ? Object.freeze({ ...opts.user }) : null
     return new Promise<T>((resolve, reject) => {
       tx.fail = reject
-      this.als.run({ tx, depth: 0 }, () => {
+      this.als.run({ tx, depth: tx.baseDepth }, () => {
         Promise.resolve()
           .then(() => fn(this.txApi(tx)))
           .then(
@@ -549,8 +555,9 @@ export class Db {
     tx.release()
 
     this.notify({ tx: txNo, ops, holdMs, events, changes, user: tx.user })
-    // after* - вне контекста завершённой транзакции (SPEC §5.6)
-    if (tx.after.length) this.als.exit(() => setTimeout(() => this.runAfter(tx), 0))
+    // after* - вне контекста завершённой транзакции, но с её глубиной:
+    // запись из after* - новая транзакция, и цепочка ограничена maxDepth.
+    if (tx.after.length) this.als.run({ tx: null, depth: tx.afterDepth }, () => setTimeout(() => this.runAfter(tx), 0))
     this.maybeCompact()
   }
 
@@ -590,7 +597,7 @@ export class Db {
 
   private depthOf(tx: Tx): number {
     const store = this.als.getStore()
-    const depth = store?.tx === tx ? store.depth : 0
+    const depth = store?.tx === tx ? store.depth : tx.baseDepth
     if (depth > this.opts.maxDepth) {
       const err = new DepthError(depth)
       this.abortTx(tx, err)
@@ -652,6 +659,7 @@ export class Db {
     if (hooks?.afterCreate) {
       const h = hooks.afterCreate
       const saved = clone(doc)
+      tx.afterDepth = Math.max(tx.afterDepth, depth + 1)
       tx.after.push({ collection: c, run: () => h({ doc: saved, db: this, user: tx.user }) })
     }
     return clone(doc)
@@ -688,6 +696,7 @@ export class Db {
       const h = hooks.afterUpdate
       const p = clone(prev)
       const d = clone(next)
+      tx.afterDepth = Math.max(tx.afterDepth, depth + 1)
       tx.after.push({ collection: c, run: () => h({ prev: p, doc: d, db: this, user: tx.user }) })
     }
     return clone(next)
@@ -719,6 +728,7 @@ export class Db {
     if (hooks?.afterDelete) {
       const h = hooks.afterDelete
       const p = clone(prev)
+      tx.afterDepth = Math.max(tx.afterDepth, depth + 1)
       tx.after.push({ collection: c, run: () => h({ prev: p, db: this, user: tx.user }) })
     }
   }

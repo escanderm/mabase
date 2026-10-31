@@ -42,6 +42,7 @@ export type ClientLimits = {
 }
 
 const DEFAULT_LIMITS: ClientLimits = { defaultLimit: 100, maxLimit: 1000, maxScanned: 20_000, maxRegexLength: 64 }
+const MAX_KEYS = 8 // полей в sort и fields на один клиентский запрос
 
 type Resolved = {
   rules: Rules
@@ -74,30 +75,44 @@ function assertFieldPath(path: string, where: string): void {
   if (forbidden) throw bad(`${where}: имя ${forbidden} в пути недопустимо`)
 }
 
-// Регулярное выражение от клиента: без групп, альтернатив и обратных ссылок,
-// не больше двух неограниченных повторов. Иначе один запрос с экспоненциальным
-// перебором повесит единственный процесс (ReDoS).
+// Регулярное выражение от клиента: без групп, альтернатив и обратных ссылок.
+// Повторов * и + - не больше двух, и не больше одного из них на '.': именно
+// '.*a.*b' и подобное даёт квадратичный перебор на строке в 1 МБ - это минуты
+// работы event loop, а таймаут транзакции не спасает, regexp синхронный.
+// Два повтора по классам ('[a-z]+\d*') безопасны: группы и альтернативы
+// запрещены, вложенных повторов не бывает.
 export function checkClientRegex(pattern: string, maxLength: number): void {
   if (pattern.length > maxLength) throw bad(`$regex длиннее ${maxLength} символов`)
   let unbounded = 0
+  let dotUnbounded = 0
+  let prev = ''
   let inClass = false
   for (let i = 0; i < pattern.length; i++) {
     const ch = pattern[i]!
     if (ch === '\\') {
       if (/[1-9k]/.test(pattern[i + 1] ?? '')) throw bad('$regex: обратные ссылки не поддерживаются')
       i++
+      prev = '' // экранированный символ - не точка и не класс
       continue
     }
     if (inClass) {
       if (ch === ']') inClass = false
       continue
     }
-    if (ch === '[') inClass = true
-    else if (ch === '(' || ch === ')') throw bad('$regex: группы не поддерживаются')
+    if (ch === '[') {
+      inClass = true
+      prev = ''
+    } else if (ch === '(' || ch === ')') throw bad('$regex: группы не поддерживаются')
     else if (ch === '|') throw bad('$regex: альтернативы (|) не поддерживаются - используйте $in или $or')
-    else if (ch === '*' || ch === '+') unbounded++
-    else if (ch === '{' && /^\{\d+,\}/.test(pattern.slice(i))) unbounded++
+    else if (ch === '*' || ch === '+') {
+      unbounded++
+      if (prev === '.') dotUnbounded++
+    } else if (ch === '{' && /^\{\d+,\}/.test(pattern.slice(i))) {
+      unbounded++
+      if (prev === '.') dotUnbounded++
+    } else prev = ch
   }
+  if (dotUnbounded > 1) throw bad('$regex: больше одного повтора .* или .+ - перебор займёт процесс')
   if (unbounded > 2) throw bad('$regex: больше двух повторов * или + в одном выражении')
 }
 
@@ -141,6 +156,13 @@ export class Access {
       }
     }
     if (r.private.size && !r.owner) throw new TypeError(`${name}: fields.private требует owner - поле с id владельца`)
+    // Владелец - не то поле, которое выбирает клиент: иначе private обходится
+    // одним PATCH'ем ('$set': { ownerId: 'я' }) и приватное поле вернётся в ответе.
+    // Задаёт его хук или действие.
+    if (r.owner && !isUsers) {
+      r.readonly.add(r.owner)
+      r.immutable.add(r.owner)
+    }
     const deps = r.rules.dependsOn ?? []
     if (!Array.isArray(deps) || !deps.every((d) => typeof d === 'string' && d)) throw new TypeError(`${name}: dependsOn - список коллекций`)
     return r
@@ -338,6 +360,10 @@ export class ClientCollection {
     const { defaultLimit, maxLimit, maxScanned } = this.s.access.limits
     const limit = opts.limit ?? defaultLimit
     if (limit > maxLimit) throw bad(`limit больше ${maxLimit}`)
+    // Сотни ключей сортировки - это клиентская нагрузка на единственный
+    // процесс: сортировка становится дороже самого перебора.
+    if (Object.keys(opts.sort ?? {}).length > MAX_KEYS) throw bad(`sort: не больше ${MAX_KEYS} полей`)
+    if ((opts.fields ?? []).length > MAX_KEYS) throw bad(`fields: не больше ${MAX_KEYS} полей`)
     for (const k of Object.keys(opts.sort ?? {})) this.s.checkField(this.name, k, 'sort')
     for (const f of opts.fields ?? []) this.s.checkField(this.name, f, 'fields')
     return { sort: opts.sort, limit, maxScanned }

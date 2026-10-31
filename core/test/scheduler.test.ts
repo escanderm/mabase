@@ -24,6 +24,33 @@ const emit = (db: Db, event: string, data: unknown, opts: { after?: string | num
   db.transaction((tx) => tx.emit(event, data, { after: opts.after ?? 0, key: opts.key }))
 
 describe('отложенные события', () => {
+  test('160. таймаут не запускает вторую копию обработчика: повтор ждёт завершения первой', async () => {
+    let running = 0
+    let maxRunning = 0
+    let calls = 0
+    const { db, s } = await setup(
+      {
+        slow: async () => {
+          calls++
+          running++
+          maxRunning = Math.max(maxRunning, running)
+          await sleep(300) // дольше таймаута
+          running--
+        },
+      },
+      { timeoutMs: 100, retryBaseMs: 30, maxAttempts: 2 },
+    )
+    await s.start()
+    await emit(db, 'slow', {})
+    await sleep(700)
+    await s.stop()
+    // Без правки: по таймауту задача уходила в повтор через 30 мс, и вторая
+    // копия работала параллельно с первой (двойное письмо/insert).
+    expect(maxRunning).toBe(1)
+    expect(calls).toBeGreaterThanOrEqual(1)
+    await db.close()
+  }, 20_000)
+
   test('115. выполняется один раз и удаляется; key свободен снова; транзакция с ошибкой задач не ставит', async () => {
     const calls: Calls = []
     const { db, s } = await setup({ greet: ({ data, task }) => void calls.push({ event: 'greet', data, attempt: task!.attempt, at: Date.now() }) })

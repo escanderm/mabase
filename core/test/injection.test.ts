@@ -12,7 +12,7 @@ import { QueryError } from '../src/errors'
 import { createHandler } from '../src/http'
 import { Mailer } from '../src/mail'
 import { applyUpdate } from '../src/query'
-import { tmpDir } from './helpers'
+import { tmpDir, waitFor } from './helpers'
 
 const SECRET = 'injection-secret-'.padEnd(48, 'x')
 
@@ -165,6 +165,27 @@ describe('индекс по числовому сегменту пути', () =>
     await withIndex.close()
     await plain.close()
   })
+})
+
+describe('after* и глубина', () => {
+  test('161. цикл after* -> запись -> after* упирается в maxDepth, а не идёт вечно', async () => {
+    const errors: unknown[] = []
+    const db = await openDb({ dir: tmpDir('after'), compactMinBytes: 0, maxDepth: 3, onError: (e) => errors.push(e) })
+    db.collection('x', {
+      hooks: {
+        afterUpdate: async ({ doc, db }) => {
+          await db.c.x!.update(doc._id, { $inc: { n: 1 } })
+        },
+      },
+    })
+    const d = await db.c.x!.insert({ n: 0 })
+    await db.c.x!.update(d._id, { $set: { touched: true } })
+    await waitFor(() => errors.length > 0, 3000)
+    expect((errors[0] as Error).name).toBe('DepthError')
+    // Цепочка ограничена: счётчик не уехал в бесконечность
+    expect(db.peek('x', d._id)!.n).toBeLessThan(10)
+    await db.close()
+  }, 15_000)
 })
 
 describe('$set через не-объект', () => {

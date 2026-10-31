@@ -15,7 +15,7 @@ import { Bus, type Handler } from './bus'
 import { Mailer, type MailMessage, type MailOptions } from './mail'
 import { checkEvents, PRESENCE, Realtime, type Conn, type EventConfig } from './realtime'
 import { Scheduler, type SchedulerOptions } from './scheduler'
-import { Tail } from './tail'
+import { maskSecrets, Tail } from './tail'
 import { createAdminApi } from './admin-api'
 import { Superusers, type SuperuserOptions } from './superusers'
 import { Settings } from './settings'
@@ -119,7 +119,9 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
     const mail = new Mailer({
       ...cfg.mail,
       onDevMail: (m) => {
-        tail.publish('mail', { to: m.to, subject: m.subject, text: m.text })
+        // В письмах сброса и смены email - рабочая одноразовая ссылка с токеном.
+        // В журнал (mabase tail, /_/journal, логи) она попадать не должна.
+        tail.publish('mail', { to: m.to, subject: m.subject, text: maskSecrets(m.text) })
         devMail(m)
       },
     })

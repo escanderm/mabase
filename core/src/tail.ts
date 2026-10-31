@@ -26,13 +26,27 @@ export class Tail {
   }
 }
 
-// Одна строка для консоли.
+// Одна строка для консоли: значения из данных не должны ломать формат
+// (перевод строки в тексте письма, ANSI-последовательности в чужой строке).
+const ANSI = /\u001B\[[0-9;]*[A-Za-z]/g
+const show = (v: unknown): string => {
+  if (typeof v !== 'string') return JSON.stringify(v)
+  const s = v.replace(ANSI, '').replace(/[\r\n\t]+/g, ' ')
+  return /[\s"\\]/.test(s) ? JSON.stringify(s) : s
+}
+
+// В письмах сброса и смены email - рабочая одноразовая ссылка. В журнал
+// (mabase tail, /_/journal, логи) токен попадать не должен.
+export function maskSecrets(text: string): string {
+  return text.replace(/([?&]token=)[^&\s]+/g, '$1***')
+}
+
 export function formatTail(e: TailEntry): string {
   const t = new Date(e.ts).toISOString().slice(11, 23)
   const { ts, kind, ...rest } = e
   const parts = Object.entries(rest)
     .filter(([, v]) => v !== undefined && v !== null)
-    .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
+    .map(([k, v]) => `${k}=${show(v)}`)
   return `${t} ${kind.padEnd(8)} ${parts.join(' ')}`
 }
 
@@ -44,7 +58,15 @@ export function tailResponse(tail: Tail): Response {
   const enc = new TextEncoder()
   const stream = new ReadableStream<Uint8Array>({
     start(ctrl) {
+      let skipped = 0
+      // Медленный читатель (mabase tail | less на паузе, журнал по плохому
+      // каналу) не должен копить память единственного процесса: если очередь
+      // потока переполнена, записи пропускаем и сообщаем, сколько.
       const send = (line: string) => {
+        if (ctrl.desiredSize !== null && ctrl.desiredSize <= 0) {
+          skipped++
+          return
+        }
         try {
           ctrl.enqueue(enc.encode(line + '\n'))
         } catch {
@@ -53,7 +75,14 @@ export function tailResponse(tail: Tail): Response {
       }
       send(JSON.stringify({ ts: Date.now(), kind: 'tail', status: 'подключено' }))
       const unlisten = tail.listen((e) => send(JSON.stringify(e)))
-      const beat = setInterval(() => send(''), 5000)
+      const beat = setInterval(() => {
+        if (skipped) {
+          const n = skipped
+          skipped = 0
+          send(JSON.stringify({ ts: Date.now(), kind: 'tail', skipped: n }))
+        }
+        send('')
+      }, 5000)
       off = () => {
         clearInterval(beat)
         unlisten()

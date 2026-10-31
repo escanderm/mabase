@@ -1,7 +1,6 @@
-// Чат с закрытыми комнатами - целевой API MaBase (design.md §19, шаг 3).
-// Этот код ещё не запускается: он описывает, каким должен быть API.
+// Чат с закрытыми комнатами - пример приложения MaBase (design.md §19, шаг 3).
 // Места, где пришлось что-то придумать сверх design.md, помечены [Q<n>] -
-// разбор в API-NOTES.md.
+// разбор в examples/chat/API-NOTES.md.
 import { ActionError, defineAction, defineCollection, defineConfig, z, type Db } from 'mabase'
 
 // ---------- общие запросы для правил ----------

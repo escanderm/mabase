@@ -133,23 +133,30 @@ export class Scheduler {
   private run(t: Doc): void {
     const attempt = (t.attempts ?? 0) + 1
     const t0 = performance.now()
+    let handler: Promise<void> | null = null
     const p = (async () => {
       try {
         const hs = this.handlers().get(t.event) ?? []
         if (!hs.length) throw new Error(`нет обработчика on('${t.event}')`)
         const signal = AbortSignal.timeout(this.o.timeoutMs)
         const task: TaskInfo = { id: t._id, attempt, runAt: t.runAt }
-        for (const h of hs) {
-          await Promise.race([
-            h({ event: t.event, data: t.data, tx: this.db.lastTx, db: this.db.c, signal, task }),
-            new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error(`таймаут ${this.o.timeoutMs} мс`)))),
-          ])
-        }
+        // Таймаут только сигналит обработчику: Promise.race перестаёт ждать, а
+        // сам обработчик продолжает работать. Поэтому результат попытки пишем
+        // после фактического завершения - иначе повтор через retryBaseMs
+        // запустил бы вторую копию параллельно с первой.
+        handler = (async () => {
+          for (const h of hs) await h({ event: t.event, data: t.data, tx: this.db.lastTx, db: this.db.c, signal, task })
+        })()
+        await Promise.race([
+          handler,
+          new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error(`таймаут ${this.o.timeoutMs} мс`)), { once: true })),
+        ])
         await this.db.c[SCHEDULED]!.remove(t._id).catch((err) => {
           if (!(err instanceof NotFoundError)) throw err
         })
         this.o.tail?.publish('task', { event: t.event, id: t._id, attempt, ms: Math.round(performance.now() - t0), ok: true })
       } catch (err) {
+        if (handler) await handler.catch(() => {}) // дождаться брошенного обработчика
         await this.failed(t, attempt, err, performance.now() - t0)
       }
     })().finally(() => {

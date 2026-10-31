@@ -425,6 +425,23 @@ describe('SDK: гонки', () => {
     for (const x of [c, alice]) x.close()
     await s.stop()
   })
+
+  test('159. выход очищает живые выборки: данные прошлого пользователя не остаются на экране', async () => {
+    const { s, mk, alice } = await world()
+    await s.db.c.messages!.insertMany([{ roomId: 'general', text: '#1' }, { roomId: 'general', text: '#2' }])
+    const feed = alice.live('messages', { roomId: 'general' }, { sort: { _id: 1 }, limit: 10 })
+    const seen: number[] = []
+    feed.subscribe((items) => seen.push(items.length))
+    await waitFor(() => feed.items.length === 2, 2000)
+
+    await alice.auth.logout()
+    // Окно чистится сразу, не дожидаясь ответа сокета: иначе на общем
+    // компьютере следующий человек увидит чужие сообщения.
+    expect(feed.items).toEqual([])
+    expect(seen.at(-1)).toBe(0)
+    alice.close()
+    await s.stop()
+  })
 })
 
 void createHash

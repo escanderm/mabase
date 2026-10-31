@@ -80,8 +80,11 @@ const LETTERS = {
 } as const satisfies Record<string, { letter: LetterKind; path: string; ttl: number }>
 type TokenKind = keyof typeof LETTERS
 
-// Смена пароля закрывает сессии и делает недействительными ссылки сброса.
-const PASSWORD_BOUND = { $in: ['session', 'reset'] }
+// Смена пароля закрывает сессии и делает недействительными все ссылки из писем:
+// сброс, подтверждение email и смену email. Ссылка смены email жила 24 часа и
+// после сброса пароля оставалась рабочей: укравший сессию у аккаунта без
+// пароля успевал увести email себе, а вместе с ним и аккаунт.
+const PASSWORD_BOUND = { $in: ['session', 'reset', 'email', 'verify'] }
 
 const OAUTH_STATE_MS = 10 * 60_000 // пользователь у провайдера
 const OAUTH_CODE_MS = 60_000 // одноразовый код от колбэка до SDK
@@ -248,7 +251,8 @@ export class Auth {
   private graceMs: number
   private minPassword!: number
   private hashes: Limiter
-  private attempts: Attempts
+  private attempts: Attempts // по аккаунту (email/телефон), независимо от IP
+  private ipAttempts: Attempts // по IP, независимо от аккаунта: ротация адресов не снимает лимит
   private authphoneUrl: string
   private authphoneTimeout: number
   private fetch: NonNullable<AuthOptions['fetch']>
@@ -279,7 +283,10 @@ export class Auth {
     this.hashes = new Limiter(opts.hashConcurrency ?? 2)
     this.now = opts.now ?? Date.now
     const limit = opts.loginLimit ?? { attempts: 10, windowMs: 15 * 60_000 }
-    this.attempts = new Attempts(limit.attempts, limit.windowMs, this.now)
+    // По аккаунту лимит мягче, чем по IP: иначе чужой человек с ботнета
+    // закрывает вход владельцу на всё окно - это DoS на аккаунт. По IP - строго.
+    this.attempts = new Attempts(Math.max(limit.attempts * 5, 20), limit.windowMs, this.now)
+    this.ipAttempts = new Attempts(limit.attempts, limit.windowMs, this.now)
     this.authphoneUrl = (opts.authphone?.url ?? 'https://authphone.su').replace(/\/$/, '')
     this.authphoneTimeout = opts.authphone?.timeoutMs ?? 5000
     this.fetch = opts.fetch ?? ((url, init) => fetch(url, init))
@@ -333,7 +340,7 @@ export class Auth {
       const data = input.data ?? {}
       if (typeof data !== 'object' || data === null || Array.isArray(data)) throw bad('data должен быть объектом')
       this.access.forUser(null).checkWrite(USERS, Object.keys(data), 'create')
-      if (info.ip) this.attempts.hit(`signup:${info.ip}`) // без IP общий счётчик закрыл бы регистрацию всем
+      if (info.ip) this.ipAttempts.hit(`signup:${info.ip}`) // без IP общий счётчик закрыл бы регистрацию всем
       const passwordHash = await this.hash(password) // до транзакции: 65 мс очередь записи не держат
       return this.db.transaction(async (tx) => {
         const user = await tx.c[USERS]!.insert({ ...data, email, passwordHash, verified: false, roles: [] })
@@ -348,14 +355,13 @@ export class Auth {
       const email = normalizeEmail(input.email)
       const invalid = new ActionError('invalid_credentials', 'Неверный email или пароль')
       if (typeof input.password !== 'string' || input.password.length > 256) throw invalid
-      const key = `email:${email}|${info.ip ?? ''}`
-      this.attempts.hit(key)
+      this.hitLoginKeys(`email:${email}`, info.ip)
       const user = await this.db.c[USERS]!.findOne({ email })
       // Нет пользователя или пароля - хэш всё равно считается: по времени
       // ответа не понять, есть ли такой email.
       const ok = await this.verifyHash(input.password, user?.passwordHash ?? (await this.dummyHash()))
       if (!user?.passwordHash || !ok) throw invalid
-      this.attempts.ok(key)
+      this.okLoginKeys(`email:${email}`, info.ip)
       return this.db.transaction(async (tx) => {
         const fresh = await tx.c[USERS]!.findOne({ _id: user._id })
         if (!fresh || fresh.passwordHash !== user.passwordHash) throw invalid // пароль сменили, пока проверяли
@@ -371,10 +377,9 @@ export class Auth {
       this.requireProvider('authphone')
       const phone = normalizePhone(input.phone)
       if (typeof input.code !== 'string' || !/^\d{6}$/.test(input.code)) throw bad('код - 6 цифр')
-      const key = `phone:${phone}|${info.ip ?? ''}`
-      this.attempts.hit(key)
+      this.hitLoginKeys(`phone:${phone}`, info.ip)
       if (!(await this.authphoneCheck(phone, input.code))) throw new ActionError('invalid_credentials', 'Неверный код')
-      this.attempts.ok(key)
+      this.okLoginKeys(`phone:${phone}`, info.ip)
       return this.db.transaction(async (tx) => {
         let user = await tx.c[USERS]!.findOne({ phone })
         if (!user) {
@@ -753,6 +758,19 @@ export class Auth {
 
   async revokeSessions(userId: string): Promise<number> {
     return this.db.c[AUTH_TOKENS]!.removeMany({ userId, kind: 'session' })
+  }
+
+  // Два счётчика на попытку входа: аккаунт и IP по отдельности. Одного ключа
+  // "email+IP" мало: с одного адреса перебирается сколько угодно аккаунтов по
+  // 10 попыток, а с ботнета - 10 попыток на адрес для одного аккаунта.
+  private hitLoginKeys(account: string, ip?: string): void {
+    this.attempts.hit(account)
+    if (ip) this.ipAttempts.hit(`ip:${ip}`)
+  }
+
+  private okLoginKeys(account: string, ip?: string): void {
+    this.attempts.ok(account)
+    if (ip) this.ipAttempts.ok(`ip:${ip}`)
   }
 
   // ---------- внутреннее ----------

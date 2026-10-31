@@ -49,7 +49,7 @@ export type RealtimeOptions = {
   maxMessageBytes?: number
   clientEventsPerSecond?: number // на соединение; лишние отбрасываются с ошибкой
   helloTimeoutMs?: number
-  verifyIntervalMs?: number // как часто перепроверять, что сессия жива
+  verifyIntervalMs?: number // как часто перепроверять, что сессия жива; 5 с
   onError?: (err: unknown, where: string) => void
   tail?: Tail
 }
@@ -134,6 +134,9 @@ export class Conn {
         case 'auth':
           return await this.reauth(msg.token)
         case 'sub':
+          // Подписка синхронно считает правило list по базе: без лимита один
+          // клиент в цикле занимает единственный процесс.
+          if (!this.rateOk()) throw new ActionError('too_many_requests', 'Слишком часто: не больше 20 сообщений в секунду')
           return await this.rt.subscribe(this, msg)
         case 'unsub':
           if (id) this.rt.unsubscribe(this, id)
@@ -164,8 +167,15 @@ export class Conn {
     if (token != null && !user) return this.close(4001, 'токен недействителен или истёк')
     this.token = typeof token === 'string' ? token : null
     this.setUser(user)
+    try {
+      await this.rt.attach(this)
+    } catch (err) {
+      // Без attach (presence) соединение не готово: клиент должен получить
+      // закрытие и обычный реконнект, а не висеть в 'connecting' навсегда.
+      this.close(4500, 'не удалось подключить соединение')
+      throw err
+    }
     this.ready = true
-    await this.rt.attach(this)
     this.send({ type: 'ready', user: user?.id ?? null, tx: this.rt.db.lastTx })
     // Сессию закрыли (выход, смена пароля, удаление) - соединение закрывается.
     // Роли поменялись - правила подписок пересчитываются.
@@ -230,7 +240,10 @@ export class Realtime {
       maxMessageBytes: opts.maxMessageBytes ?? 64 << 10,
       clientEventsPerSecond: opts.clientEventsPerSecond ?? 20,
       helloTimeoutMs: opts.helloTimeoutMs ?? 10_000,
-      verifyIntervalMs: opts.verifyIntervalMs ?? 60_000,
+      // Выход и смена пароля должны закрывать и открытый сокет. Мгновенно это
+      // делает проверка на каждом событии, но подписка может молчать - поэтому
+      // перепроверяем раз в 5 секунд, а не раз в минуту.
+      verifyIntervalMs: opts.verifyIntervalMs ?? 5_000,
       onError: opts.onError ?? ((err, where) => console.error(`[mabase] ошибка в ${where}`, err)),
       tail: opts.tail,
     }

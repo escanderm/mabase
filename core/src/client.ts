@@ -23,6 +23,11 @@ export class MabaseError extends Error {
   }
 }
 
+// Сервер не отдаёт больше maxLimit (по умолчанию 1000). Окно live() не может
+// быть больше: иначе перечитывание после reset/реконнекта получало 400 и
+// лента замирала навсегда.
+const MAX_LIVE = 1000
+
 export type KeyValueStorage = { getItem(k: string): string | null; setItem(k: string, v: string): void; removeItem(k: string): void }
 
 export type ClientOptions = {
@@ -143,8 +148,9 @@ export class MabaseClient {
   on(event: string, fn: (arg: any) => void): () => void {
     let set = this.listeners.get(event)
     if (!set) this.listeners.set(event, (set = new Set()))
+    const isNew = !set.has(fn) // та же функция дважды - одно удержание сокета, иначе off() не отпустит его никогда
     set.add(fn)
-    if (event !== 'connection' && event !== 'error') this.socket.retain()
+    if (isNew && event !== 'connection' && event !== 'error') this.socket.retain()
     return () => {
       if (set!.delete(fn) && event !== 'connection' && event !== 'error') this.socket.release()
     }
@@ -298,12 +304,18 @@ class AuthClient {
           return true
         }
         if (res.status === 409) {
-          const stored = this.read()
-          if (stored && stored.refreshToken !== s.refreshToken) {
-            this.session = stored
-            this.schedule()
-            this.mb.socket.reauth()
-            return true
+          // Соседняя вкладка уже обновила токен, но могла ещё не записать его в
+          // общее хранилище. Несколько коротких попыток прочитать - иначе
+          // разлогин обеих вкладок из-за гонки.
+          for (let i = 0; i < 5; i++) {
+            const stored = this.read()
+            if (stored && stored.refreshToken !== s.refreshToken) {
+              this.session = stored
+              this.schedule()
+              this.mb.socket.reauth()
+              return true
+            }
+            await new Promise((r) => setTimeout(r, 20 + i * 20))
           }
         }
         if (res.status === 401 || res.status === 409) {
@@ -324,6 +336,7 @@ class AuthClient {
     this.schedule()
     const after = s?.user._id ?? null
     if (before !== after) {
+      this.mb.socket.resetLives() // данные прошлого пользователя не должны остаться на экране
       this.mb.socket.userChanged() // другой пользователь - другие правила: переподключиться
       for (const fn of this.listeners) fn(this.user)
     } else if (!opts.quiet || s) this.mb.socket.reauth()
@@ -430,6 +443,12 @@ class Socket {
 
   nextId(): string {
     return `l${++this.seq}`
+  }
+
+  // Выход или смена пользователя: живые выборки чистим, не дожидаясь ответа
+  // сервера (иначе на общем компьютере остаются чужие данные).
+  resetLives(): void {
+    for (const l of this.lives.values()) l.clear()
   }
 
   retain(): void {
@@ -635,7 +654,7 @@ export class Live<T extends Doc = Doc> {
       const page = await this.mb.c[this.collection]!.list(and(this.filter, cursor), { sort: this.opts.sort, limit: n, fields: this.opts.fields })
       const have = new Set(this.items.map((d) => d._id))
       for (const d of page.items) if (!have.has(d._id)) this.items.push(d as T)
-      this.size += n
+      this.size = Math.min(this.size + n, MAX_LIVE)
       this.exhausted = page.items.length < n
       // изменения, пришедшие во время чтения страницы и после её tx, - поверх
       for (const b of this.during) if (b.tx > page.tx) this.apply(b.items)
@@ -651,6 +670,12 @@ export class Live<T extends Doc = Doc> {
     if (this.closed) return
     this.closed = true
     this.mb.socket.removeLive(this)
+  }
+
+  /** @internal */ clear(): void {
+    if (this.closed || this.items.length === 0) return
+    this.items = []
+    this.emit('change', this.items)
   }
 
   // ----- от соединения -----
@@ -675,6 +700,9 @@ export class Live<T extends Doc = Doc> {
     this.during?.push({ tx, items })
     this.apply(items)
     this.items.sort(this.cmp)
+    // Окно не больше заявленного: поток новых записей не должен превращать
+    // живую ленту в бесконечный массив в памяти.
+    if (this.items.length > this.size) this.items.length = this.size
     this.emit('change', this.items)
   }
 
@@ -706,8 +734,13 @@ export class Live<T extends Doc = Doc> {
     try {
       do {
         this.again = false
-        const limit = Math.max(this.size, this.items.length) // окно не сжимается после loadMore
-        const r = await this.mb.c[this.collection]!.list(this.filter, { sort: this.opts.sort, limit, fields: this.opts.fields })
+        // Окно не сжимается после loadMore, но и не может быть больше лимита
+        // сервера: иначе reread получал 400 и больше не перечитывал никогда.
+        const limit = Math.min(Math.max(this.size, this.items.length), MAX_LIVE)
+        const r = await this.mb.c[this.collection]!.list(this.filter, { sort: this.opts.sort, limit, fields: this.opts.fields }).catch(async (err) => {
+          if (!(err instanceof MabaseError) || err.status !== 400 || limit === (this.opts.limit ?? 100)) throw err
+          return this.mb.c[this.collection]!.list(this.filter, { sort: this.opts.sort, limit: this.opts.limit ?? 100, fields: this.opts.fields })
+        })
         if (this.closed) return
         this.items = r.items as T[]
         this.exhausted = r.items.length < limit
