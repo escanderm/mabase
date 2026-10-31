@@ -115,8 +115,27 @@ export function bindMailer(m: Mailer | null): void {
 }
 
 // Сбросить состояние модуля (тесты, повторная загрузка конфига).
-export function resetApi(): void {
+// Снимок и восстановление реестров - для перезагрузки хуков: если новый файл
+// не загрузился, работают прежние обработчики (design.md §5).
+export type HooksSnapshot = { handlers: Map<string, EventHandler[]>; schedules: ScheduleDef[] }
+
+/** @internal */ export function snapshotHooks(): HooksSnapshot {
+  return { handlers: new Map([...handlers].map(([k, v]) => [k, [...v]])), schedules: schedules.map((s) => ({ ...s })) }
+}
+
+/** @internal */ export function restoreHooks(s: HooksSnapshot): void {
+  handlers.clear()
+  for (const [k, v] of s.handlers) handlers.set(k, v)
+  schedules.length = 0
+  schedules.push(...s.schedules)
+}
+
+/** @internal */ export function resetHooks(): void {
   handlers.clear()
   schedules.length = 0
+}
+
+export function resetApi(): void {
+  resetHooks()
   currentMailer = null
 }

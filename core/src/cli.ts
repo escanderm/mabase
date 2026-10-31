@@ -107,6 +107,7 @@ export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): 
     scheduler: appCfg.scheduler,
     admin: appCfg.admin,
     handlers: api.eventHandlers,
+    hooksDir,
     http: { ...appCfg.http, publicDir: flags.public ?? appCfg.http?.publicDir ?? (existsSync(defaultPublic) ? defaultPublic : undefined) },
   }
   let seed: api.SeedDefinition | undefined
@@ -140,7 +141,7 @@ export async function run(argv: string[], out: (line: string) => void = console.
       out(`MaBase ${VERSION}: ${s.url}`)
       out(`  данные: ${flags.dir}`)
       if (flags.dev) out('  режим разработки: правила проверяются на dependsOn')
-      if (hooks.length) out(`  хуки: ${hooks.join(', ')}`)
+      if (hooks.length) out(`  хуки: ${hooks.join(', ')} (перезагружаются при изменении)`)
       if (events.length) out(`  обработчики событий: ${events.join(', ')}`)
       if (s.realtime) out(`  realtime: ${s.url.replace('http', 'ws')}/api/realtime`)
       if (config.admin?.enabled !== false) out(`  админка: ${s.url}/_/`)

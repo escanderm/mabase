@@ -15,6 +15,7 @@ import { Bus, type Handler } from './bus'
 import { Mailer, type MailMessage, type MailOptions } from './mail'
 import { checkEvents, PRESENCE, Realtime, type Conn, type EventConfig } from './realtime'
 import { Scheduler, ensureSchedules, type SchedulerOptions } from './scheduler'
+import { reloadHooks as reloadHookFiles, watchHooks, type HooksInfo } from './hooks'
 import { scheduledTasks } from './api'
 import { writeEditorTypes } from './editor'
 import { attachFileCleanup, FILES, FileStore } from './files'
@@ -42,6 +43,8 @@ export type ServerConfig = {
   realtime?: boolean // WebSocket /api/realtime
   events?: Record<string, EventConfig>
   handlers?: () => ReadonlyMap<string, readonly Handler[]> // on() из mb_hooks
+  hooksDir?: string // папка mb_hooks для горячей перезагрузки
+  watchHooks?: boolean // следить за hooksDir; по умолчанию да, если папка задана
   scheduler?: Omit<SchedulerOptions, 'onError' | 'tail'> // отложенные события
   env?: Record<string, string | undefined>
   onWarning?: (message: string) => void
@@ -215,7 +218,15 @@ export function readAdminInfo(dataDir: string): AdminInfo | null {
 }
 
 // setupUrl - ссылка первичной настройки админки, пока нет ни одного суперпользователя.
-export type RunningServer = App & { url: string; adminToken: string; setupUrl: string | null; realtime: Realtime | null; scheduler: Scheduler; stop: () => Promise<void> }
+export type RunningServer = App & {
+  url: string
+  adminToken: string
+  setupUrl: string | null
+  realtime: Realtime | null
+  scheduler: Scheduler
+  reloadHooks: () => Promise<HooksInfo>
+  stop: () => Promise<void>
+}
 
 export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
   const warn = cfg.onWarning ?? ((m: string) => console.warn(`[mabase] ${m}`))
@@ -245,6 +256,28 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
     })
     const overdue = await scheduler.start()
     if (overdue) warn(`Отложенных событий, пропущенных за время простоя: ${overdue}. Выполняются сейчас`)
+
+    // Горячая перезагрузка хуков: правка mb_hooks/*.ts подхватывается без
+    // рестарта. Ошибка в файле не роняет сервер - работают прежние хуки.
+    const reload = async (): Promise<HooksInfo> => {
+      const r = await reloadHookFiles(cfg.hooksDir!)
+      if (scheduledTasks().length) await ensureSchedules(app.db, scheduledTasks())
+      return r
+    }
+    const stopWatch =
+      cfg.hooksDir && cfg.watchHooks !== false
+        ? watchHooks(cfg.hooksDir, () => {
+            void reload()
+              .then((r) => {
+                app.tail.publish('hooks', { ...r, ok: true })
+                warn(`хуки перезагружены: файлов ${r.files}, обработчиков ${r.handlers}, задач ${r.schedules}`)
+              })
+              .catch((err) => {
+                app.tail.publish('hooks', { ok: false, error: String(err) })
+                warn(`хуки НЕ перезагружены, работают прежние: ${(err as Error).message}`)
+              })
+          })
+        : () => {}
     type WsData = { conn?: Conn }
     const server = Bun.serve<WsData, {}>({
       port: cfg.port ?? 8090,
@@ -289,8 +322,10 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
       setupUrl: setup && `${url}/_/#/setup/${setup}`,
       realtime,
       scheduler,
+      reloadHooks: () => (cfg.hooksDir ? reload() : Promise.resolve({ files: 0, handlers: 0, schedules: 0 })),
       stop: () =>
         (stopped ??= (async () => {
+          stopWatch()
           await scheduler.stop()
           await realtime?.stop()
           // Bun 1.3.12: stop(true) не завершается, если через сервер прошёл
