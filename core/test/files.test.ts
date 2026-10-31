@@ -8,7 +8,7 @@ import { Access } from '../src/access'
 import { Auth } from '../src/auth'
 import { createClient } from '../src/client'
 import { openDb } from '../src/db'
-import { attachFileCleanup, FILES, FileStore } from '../src/files'
+import { attachFileCleanup, FILES, FileStore, LocalStorage } from '../src/files'
 import { createHandler } from '../src/http'
 import { Mailer } from '../src/mail'
 import { startServer } from '../src/server'
@@ -22,7 +22,7 @@ async function setup(opts: { rules?: Record<string, unknown>; maxUploadBytes?: n
   const db = await openDb({ dir, fsync: false, compactMinBytes: 0 })
   db.collection('docs', { schema: z.object({ title: z.string(), avatar: z.string().optional(), photos: z.array(z.string()).optional() }).passthrough() })
   db.collection(FILES, { indexes: ['recordId'] })
-  const files = new FileStore(join(dir, 'files'), opts.maxUploadBytes ?? 1 << 20)
+  const files = new FileStore(new LocalStorage(join(dir, 'files')), opts.maxUploadBytes ?? 1 << 20)
   const defs = {
     docs: {
       files: { avatar: { accept: ['image/'], maxBytes: opts.fieldMax ?? 100_000 }, photos: { many: true } },
@@ -150,7 +150,7 @@ describe('файлы', () => {
     const db2 = await openDb({ dir, fsync: false, compactMinBytes: 0 })
     const meta = await db2.c[FILES]!.findOne({ _id: r.body.avatar })
     expect(meta).toMatchObject({ recordId: r.body._id, name: 'a.png' })
-    expect(new Uint8Array((await files.read(meta as any)))).toEqual(png())
+    expect(new Uint8Array(await files.read(meta as any))).toEqual(png())
     await db2.close()
     void access
     void auth

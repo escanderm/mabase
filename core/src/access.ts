@@ -346,7 +346,7 @@ export class ClientSession {
     const parent = await this.access.db.c[meta.collection]!.findOne(and(rule, { _id: meta.recordId }))
     if (!parent) throw new ActionError('not_found', 'Файл не найден')
     try {
-      return { meta, bytes: store.read(meta) }
+      return { meta, bytes: await store.read(meta) }
     } catch {
       throw new ActionError('not_found', 'Файл не найден')
     }
@@ -465,7 +465,7 @@ export class ClientCollection {
       const id = typeof (doc as any)._id === 'string' ? (doc as any)._id : ulid()
       // Файлы - на диск до транзакции: откат удалит их, а метаданные в _files
       // попали бы в ту же строку лога, что и запись.
-      const saved = uploads ? store!.save(this.name, id, def.files, uploads) : null
+      const saved = uploads ? await store!.save(this.name, id, def.files, uploads) : null
       try {
         // Поля-файлы приходят загрузкой, их значения (id) пишет сервер; всё
         // остальное - как обычно: скрытое и readonly клиент не задаёт.
@@ -479,7 +479,7 @@ export class ClientCollection {
         }, { user: this.s.user, origin: 'api' })
         return this.s.strip(this.name, out)
       } catch (err) {
-        if (saved) store!.removeMany(saved.metas)
+        if (saved) await store!.removeMany(saved.metas)
         throw err
       }
     })
@@ -508,7 +508,7 @@ export class ClientCollection {
       const def = this.s.access._def(this.name)
       const store = this.s.access.opts.files
       const uploads = this.prepareUploads(def.files, store, opts.files, (update as any).$set ?? {})
-      const saved = uploads ? store!.save(this.name, id, def.files, uploads) : null
+      const saved = uploads ? await store!.save(this.name, id, def.files, uploads) : null
       // Значение поля-файла меняется через $set: новые id приходят из загрузки.
       const upd = saved ? { ...(update as object), $set: { ...(update as Update).$set, ...saved.values } } : (update as Update)
       try {
@@ -526,7 +526,7 @@ export class ClientCollection {
         }, { user: this.s.user, origin: 'api' })
         return this.s.strip(this.name, out)
       } catch (err) {
-        if (saved) store!.removeMany(saved.metas)
+        if (saved) await store!.removeMany(saved.metas)
         throw err
       }
     })

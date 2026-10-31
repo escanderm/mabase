@@ -144,12 +144,23 @@ declare module 'mabase' {
   /** События записей и свои: <коллекция>.created | updated | deleted, emit('order.paid') */
   export function on(event: string, fn: EventHandler): void
 
+  export type S3Options = {
+    bucket: string
+    region: string
+    accessKeyId: string
+    secretAccessKey: string
+    endpoint?: string
+    prefix?: string
+    forcePathStyle?: boolean
+    sessionToken?: string
+  }
   export type AppConfig<
     C extends readonly CollectionDefinition<any, any>[] = CollectionDefinition<any, any>[],
     A extends readonly ActionDef<any, any, any>[] = ActionDef<any, any, any>[],
   > = {
     collections?: C
     actions?: A
+    storage?: { s3?: S3Options }
     auth?: Record<string, unknown>
     mail?: Record<string, unknown>
     http?: Record<string, unknown>

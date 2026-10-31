@@ -18,7 +18,7 @@ import { Scheduler, ensureSchedules, type SchedulerOptions } from './scheduler'
 import { reloadHooks as reloadHookFiles, watchHooks, type HooksInfo } from './hooks'
 import { scheduledTasks } from './api'
 import { writeEditorTypes } from './editor'
-import { attachFileCleanup, FILES, FileStore } from './files'
+import { attachFileCleanup, FILES, FileStore, LocalStorage, S3Storage, type S3Options } from './files'
 import { maskSecrets, Tail } from './tail'
 import { createAdminApi } from './admin-api'
 import { Superusers, type SuperuserOptions } from './superusers'
@@ -43,6 +43,7 @@ export type ServerConfig = {
   realtime?: boolean // WebSocket /api/realtime
   events?: Record<string, EventConfig>
   handlers?: () => ReadonlyMap<string, readonly Handler[]> // on() из mb_hooks
+  storage?: { s3?: S3Options } // где лежат файлы; нет - локальная папка dataDir/files
   hooksDir?: string // папка mb_hooks для горячей перезагрузки
   watchHooks?: boolean // следить за hooksDir; по умолчанию да, если папка задана
   scheduler?: Omit<SchedulerOptions, 'onError' | 'tail'> // отложенные события
@@ -107,8 +108,9 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
   } catch (err) {
     warn(`типы для редактора не записались: ${(err as Error).message}`)
   }
-  // Файлы: <dataDir>/files/<collection>/<recordId>/ (design.md §16).
-  const files = new FileStore(join(cfg.dataDir, 'files'), cfg.http?.maxUploadBytes)
+  // Файлы: S3, если настроен, иначе локальная папка <dataDir>/files/... (§16).
+  const fileStorage = cfg.storage?.s3 ? new S3Storage(cfg.storage.s3) : new LocalStorage(join(cfg.dataDir, 'files'))
+  const files = new FileStore(fileStorage, cfg.http?.maxUploadBytes)
   const db = await openDb({
     ...cfg.db,
     dir: join(cfg.dataDir, 'db'),

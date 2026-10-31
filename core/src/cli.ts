@@ -106,6 +106,7 @@ export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): 
     events: appCfg.events,
     scheduler: appCfg.scheduler,
     admin: appCfg.admin,
+    storage: appCfg.storage,
     handlers: api.eventHandlers,
     hooksDir,
     http: { ...appCfg.http, publicDir: flags.public ?? appCfg.http?.publicDir ?? (existsSync(defaultPublic) ? defaultPublic : undefined) },

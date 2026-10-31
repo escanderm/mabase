@@ -12,6 +12,7 @@ import type { MailMessage, Mailer, MailOptions } from './mail'
 import type { ClientLimits } from './access'
 import type { Handler } from './bus'
 import type { EventConfig } from './realtime'
+import type { S3Options } from './files'
 import type { SchedulerOptions } from './scheduler'
 import type { SuperuserOptions } from './superusers'
 
@@ -36,6 +37,8 @@ export function defineCollection<N extends string, S extends z.ZodType | undefin
   return { ...def, name }
 }
 
+export type StorageConfig = { s3?: S3Options }
+
 export type AppConfig<
   C extends readonly CollectionDefinition<any, any>[] = CollectionDefinition<any, any>[],
   A extends readonly ActionDef<any, any, any>[] = ActionDef<any, any, any>[],
@@ -49,11 +52,12 @@ export type AppConfig<
   db?: Pick<DbOptions, 'txTimeoutMs' | 'compactMinBytes' | 'bigTxOps' | 'maxDepth'>
   realtime?: boolean // WebSocket /api/realtime
   events?: Record<string, EventConfig> // что уходит в сокет (design.md §12)
+  storage?: StorageConfig // где лежат файлы: S3 или локальная папка
   scheduler?: Omit<SchedulerOptions, 'onError' | 'tail'> // отложенные события: попытки, паузы
   admin?: { enabled?: boolean; superusers?: Omit<SuperuserOptions, 'now'> } // админка /_/
 }
 
-const CONFIG_KEYS = new Set(['collections', 'actions', 'auth', 'mail', 'http', 'limits', 'db', 'realtime', 'events', 'scheduler', 'admin'])
+const CONFIG_KEYS = new Set(['collections', 'actions', 'auth', 'mail', 'http', 'limits', 'db', 'realtime', 'events', 'scheduler', 'admin', 'storage'])
 
 export function defineConfig<C extends readonly CollectionDefinition<any, any>[], A extends readonly ActionDef<any, any, any>[]>(cfg: AppConfig<C, A>): AppConfig<C, A> {
   for (const k of Object.keys(cfg)) if (!CONFIG_KEYS.has(k)) throw new TypeError(`defineConfig: неизвестный раздел "${k}"`)
