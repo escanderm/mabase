@@ -12,12 +12,14 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from 'node:fs'
 import { open, type FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { crashPoint } from './crash'
 import { CorruptionError, LockedError, ReadOnlyError } from './errors'
 import type { Doc } from './query'
@@ -31,6 +33,8 @@ const FORMAT_VERSION = 1
 const GEN_FILE = /^(snapshot|log)\.(\d+)\.jsonl(\.tmp)?$/
 const STALE_EMPTY_LOCK_MS = 2000
 const SNAPSHOT_CHUNK = 5000
+const READ_CHUNK = 4 << 20 // чтение снапшота кусками
+const MAX_LINE = 64 << 20 // строка без перевода строки дольше - это порча
 
 const logHeader = (base: number) =>
   JSON.stringify({ format: 'mabase-log', version: FORMAT_VERSION, base }) + '\n'
@@ -206,49 +210,52 @@ export class Disk {
     }
   }
 
+  // Снапшот читается построчно, а не readFileSync+split: на миллионе
+  // документов это гигабайты, и склейка их в одну строку стоила времени и
+  // памяти. Ошибки те же, что были.
   private loadSnapshot(n: number): Data {
     const name = `snapshot.${n}.jsonl`
     const path = this.p(name)
     if (!existsSync(path)) throw new CorruptionError(`Нет снапшота ${name}`)
-    const lines = readFileSync(path, 'utf8').split('\n')
     const bad = (why: string) => new CorruptionError(`Снапшот ${name} повреждён: ${why}`)
-
-    let header: any
-    try {
-      header = JSON.parse(lines[0]!)
-    } catch {
-      throw bad('нет заголовка')
-    }
-    if (header.format !== 'mabase-snapshot' || header.version !== FORMAT_VERSION || header.tx !== n) {
-      throw bad(`неверный заголовок ${lines[0]}`)
-    }
-
     const data: Data = new Map()
+    let header: any
+    let line = 0
     let count = 0
     let ended = false
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i]!
-      if (line === '') {
-        if (i !== lines.length - 1) throw bad(`пустая строка ${i + 1}`)
-        continue
+
+    readLines(path, (text) => {
+      line++
+      if (line === 1) {
+        try {
+          header = JSON.parse(text)
+        } catch {
+          throw bad('нет заголовка')
+        }
+        if (header.format !== 'mabase-snapshot' || header.version !== FORMAT_VERSION || header.tx !== n) {
+          throw bad(`неверный заголовок ${text}`)
+        }
+        return
       }
-      if (ended) throw bad(`данные после строки конца, строка ${i + 1}`)
+      if (text === '') throw bad(`пустая строка ${line}`)
+      if (ended) throw bad(`данные после строки конца, строка ${line}`)
       let rec: any
       try {
-        rec = JSON.parse(line)
+        rec = JSON.parse(text)
       } catch {
-        throw bad(`строка ${i + 1} не читается`)
+        throw bad(`строка ${line} не читается`)
       }
       if (rec.end === true) {
         if (rec.count !== count) throw bad(`ожидалось ${rec.count} документов, прочитано ${count}`)
         ended = true
-        continue
+        return
       }
       let coll = data.get(rec.c)
       if (!coll) data.set(rec.c, (coll = new Map()))
       coll.set(rec.doc._id, rec.doc)
       count++
-    }
+    })
+    if (line === 0) throw bad('нет заголовка')
     if (!ended) throw bad('нет строки конца')
     return data
   }
@@ -480,5 +487,33 @@ export class Disk {
     await this.fh?.close()
     this.fh = null
     this.releaseLock()
+  }
+}
+
+// Построчное чтение файла кусками по 4 МБ. StringDecoder держит границы
+// многобайтных символов, иначе разрезанная кириллица ломала бы JSON.
+function readLines(path: string, onLine: (line: string) => void): void {
+  const fd = openSync(path, 'r')
+  const buf = Buffer.allocUnsafe(READ_CHUNK)
+  const decoder = new StringDecoder('utf8')
+  let rest = ''
+  try {
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null)
+      if (!n) break
+      rest += decoder.write(buf.subarray(0, n))
+      let start = 0
+      let nl: number
+      while ((nl = rest.indexOf('\n', start)) >= 0) {
+        onLine(rest.slice(start, nl))
+        start = nl + 1
+      }
+      if (start) rest = rest.slice(start)
+      if (rest.length > MAX_LINE) throw new CorruptionError(`${path}: строка длиннее ${MAX_LINE} байт без перевода строки`)
+    }
+    rest += decoder.end()
+    if (rest !== '') onLine(rest)
+  } finally {
+    closeSync(fd)
   }
 }
