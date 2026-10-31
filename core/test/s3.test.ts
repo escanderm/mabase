@@ -39,7 +39,7 @@ function fakeS3(cfg: { accessKeyId: string; secretAccessKey: string; region: str
         return new Response(null, { status: 204 })
       }
       const obj = objects.get(url.pathname)
-      return obj ? new Response(obj) : new Response('NoSuchKey', { status: 404 })
+      return obj ? new Response(obj as unknown as BodyInit) : new Response('NoSuchKey', { status: 404 })
     },
   })
   return { port: server.port, objects, calls, stop: () => server.stop(true) }

@@ -201,7 +201,8 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
       }
       const doc: Record<string, unknown> = {}
       const files: Record<string, Upload[]> = {}
-      for (const [k, v] of form.entries()) {
+      // Форма может отдать и строку, и File: в типах Bun строки уже, приводим сами
+      for (const [k, v] of form.entries() as IterableIterator<[string, string | File]>) {
         if (typeof v === 'string') {
           try {
             doc[k] = JSON.parse(v)
@@ -226,7 +227,7 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
       const { meta, bytes } = await access.forUser(await user()).file(parts[1])
       const name = encodeURIComponent(meta.name)
       const disposition = url.searchParams.get('download') ? 'attachment' : 'inline'
-      return new Response(bytes, {
+      return new Response(bytes as unknown as BodyInit, {
         headers: {
           'Content-Type': meta.mime,
           'Content-Length': String(meta.size),

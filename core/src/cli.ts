@@ -18,6 +18,8 @@ import { openDb } from './db'
 import { LockedError } from './errors'
 import { configView } from './config-view'
 import { readEnv } from './env'
+import type { S3Options } from './files'
+import type { SmtpOptions } from './mail'
 import { importNdjson } from './import'
 import { applyMigrations, loadMigrations } from './migrations'
 import { formatTail } from './tail'
@@ -166,7 +168,7 @@ export async function loadProject(
       ...(env.overrides.auth?.appUrl !== undefined && { appUrl: env.overrides.auth.appUrl }),
       ...(oauth && { oauth }),
     },
-    mail: { ...appCfg.mail, ...(env.overrides.mail?.from !== undefined && { from: env.overrides.mail.from }), ...(smtp && { smtp }) },
+    mail: { ...appCfg.mail, ...(env.overrides.mail?.from !== undefined && { from: env.overrides.mail.from }), ...(smtp?.host && { smtp: smtp as SmtpOptions }) },
     limits: appCfg.limits,
     db: appCfg.db,
     dev: flags.dev,
@@ -174,7 +176,7 @@ export async function loadProject(
     events: appCfg.events,
     scheduler: appCfg.scheduler,
     admin: appCfg.admin,
-    storage: s3 ? { s3 } : undefined,
+    storage: s3 ? { s3: s3 as S3Options } : undefined,
     handlers: api.eventHandlers,
     hooksDir,
     http: { ...appCfg.http, publicDir, ...(serverUrl !== undefined && { serverUrl }), ...(cors !== undefined && { cors }) },

@@ -47,7 +47,7 @@ async function setup(opts: { rules?: Record<string, unknown>; maxUploadBytes?: n
   return { db, files, access, auth, h, call, post, dir }
 }
 
-const fileOf = (bytes: Uint8Array, name = 'a.png', type = 'image/png') => new File([bytes], name, { type })
+const fileOf = (bytes: Uint8Array, name = 'a.png', type = 'image/png') => new File([bytes as unknown as BlobPart], name, { type })
 
 describe('файлы', () => {
   test('166. загрузка в записи: id в документе, метаданные в _files, байты на диске', async () => {

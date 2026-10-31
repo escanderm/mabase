@@ -1,5 +1,17 @@
 # Изменения
 
+## 0.2.9
+
+- Проверка типов в CI: `bun run typecheck` (`tsc --noEmit`, `strict` +
+  `noUncheckedIndexedAccess`) на каждой правке, в обоих окружениях матрицы.
+- В devDependencies добавлены `typescript` и `@types/bun`: без них `tsc` не
+  видел `Bun`, `process` и `node:*`, и «243 ошибки» были в основном этим, а не
+  кодом.
+- Разобраны все настоящие ошибки типов (24): сужение `Tx | null`, форма
+  multipart (`string | File`), `Bun.serve` с лишним generic, `*.css`-импорт,
+  `Uint8Array<ArrayBuffer>` в `Bun.CryptoHasher`/`gunzipSync`, частичные
+  `SmtpOptions`/`S3Options` после слияния с env, `fetch` в SDK, типы в тестах.
+
 ## 0.2.8
 
 - Настройки из окружения: фиксированный контракт `MABASE_*` с валидацией

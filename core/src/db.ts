@@ -391,10 +391,11 @@ export class Db {
   // user - кто пишет; доходит до хуков. Вложенная транзакция берёт его у внешней.
   transaction<T>(fn: (tx: TxApi) => T | Promise<T>, opts: { user?: User | null; origin?: Origin } = {}): Promise<T> {
     const store = this.als.getStore()
-    if (store?.tx) {
+    const current = store?.tx
+    if (current) {
       // вложенная транзакция присоединяется к текущей
-      this.ensureOpen(store.tx)
-      return Promise.resolve().then(() => fn(this.txApi(store.tx)))
+      this.ensureOpen(current)
+      return Promise.resolve().then(() => fn(this.txApi(current)))
     }
     const tx = new Tx()
     // after*-хук работает вне транзакции, но его запись - продолжение цепочки:

@@ -118,7 +118,7 @@ export class MabaseClient {
     this.opts = {
       storage: opts.storage ?? defaultStorage('localStorage'),
       sessionStorage: opts.sessionStorage ?? defaultStorage('sessionStorage'),
-      fetch: opts.fetch ?? ((...a) => fetch(...a)),
+      fetch: (opts.fetch ?? ((...a: Parameters<typeof fetch>) => fetch(...a))) as typeof fetch,
       WebSocket: opts.WebSocket ?? (globalThis as any).WebSocket,
       authphoneUrl: (opts.authphoneUrl ?? 'https://authphone.su').replace(/\/$/, ''),
       refreshBeforeMs: opts.refreshBeforeMs ?? 60_000,

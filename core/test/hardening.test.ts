@@ -68,7 +68,7 @@ describe('ReDoS', () => {
     await db.c.x!.insert({ a: 1 })
     const access = new Access(db, { x: { rules: { list: () => true } } })
     const c = access.forUser(null).c.x!
-    const sort = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`f${i}`, 1]))
+    const sort = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`f${i}`, 1])) as Record<string, 1 | -1>
     expect(await c.find({}, { sort }).catch((e) => e.message)).toContain('не больше 8')
     expect(await c.find({}, { fields: Array.from({ length: 9 }, (_, i) => `f${i}`) }).catch((e) => e.message)).toContain('не больше 8')
     expect(await c.find({}, { sort: { a: 1 }, fields: ['a'] })).toHaveLength(1)

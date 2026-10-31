@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "test": "bun test --timeout 180000",
+    "typecheck": "tsc --noEmit",
     "bench": "bun bench/query.ts",
     "build": "bun build.ts",
     "release": "bun build.ts --release"
@@ -12,5 +13,9 @@
     "nodemailer": "10.1.0",
     "sift": "^17.1.4",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "5"
   }
 }

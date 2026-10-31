@@ -309,7 +309,7 @@ export class Auth {
   }
 
   static check(o: AuthSettings, mailMode: Mailer['mode']) {
-    const providers = new Set(o.providers ?? ['password'])
+    const providers = new Set<AuthProvider>(o.providers ?? ['password'])
     for (const p of providers) {
       if (p === 'password' || p === 'authphone') continue
       if (!(p in OAUTH_PROVIDERS)) throw new TypeError(`auth.providers: неизвестный способ входа ${p}`)

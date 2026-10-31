@@ -39,7 +39,7 @@ async function runWorker(dir: string, runId: string, count: number, env: Record<
       const [, tx, batch] = l.split(' ')
       return { tx: Number(tx), batch: batch! }
     })
-  return { acks, signal: proc.signalCode ?? null, exitCode: proc.exitCode, stderr }
+  return { acks, signal: proc.signalCode != null ? String(proc.signalCode) : null, exitCode: proc.exitCode, stderr }
 }
 
 // Инварианты SPEC §7 после восстановления.

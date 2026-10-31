@@ -8,20 +8,23 @@ import { tmpDir } from './helpers'
 
 const PLATFORM = 'test-arch'
 const script = (version: string) => new TextEncoder().encode(`#!/bin/sh\necho ${version}\n`)
-const sha = (b: Uint8Array) => new Bun.CryptoHasher('sha256').update(b).digest('hex')
+const sha = (b: Uint8Array) => new Bun.CryptoHasher('sha256').update(b as unknown as Uint8Array<ArrayBuffer>).digest('hex')
 
 type Release = { tag: string; bin?: Uint8Array; sum?: string; noAsset?: boolean }
 
 function fakeGitHub(rel: Release | null) {
-  const archive = rel?.bin && Bun.gzipSync(tar([{ name: 'mabase', data: rel.bin, mode: 0o755 }, { name: 'LICENSE', data: new Uint8Array([77]), mode: 0o644 }]))
+  const archive = rel?.bin && Bun.gzipSync(tar([{ name: 'mabase', data: rel.bin, mode: 0o755 }, { name: 'LICENSE', data: new Uint8Array([77]), mode: 0o644 }]) as unknown as Uint8Array<ArrayBuffer>)
   const name = assetName(PLATFORM)
-  const server = Bun.serve({
+  // server.url нужен внутри fetch - объявляем заранее, иначе tsc видит
+  // самоссылку и требует any
+  let server: { url: URL; stop: (closeActiveConnections?: boolean) => void }
+  server = Bun.serve({
     port: 0,
-    fetch(req) {
+    fetch(req: Request): Response | Promise<Response> {
       const { pathname } = new URL(req.url)
       if (pathname === '/repos/x/releases/latest') {
         if (!rel) return Response.json({ message: 'Not Found' }, { status: 404 })
-        const assets = rel.noAsset ? [] : [{ name, browser_download_url: `${server.url}dl/${name}` }]
+        const assets: Array<{ name: string; browser_download_url: string }> = rel.noAsset ? [] : [{ name, browser_download_url: `${server.url}dl/${name}` }]
         assets.push({ name: 'checksums.txt', browser_download_url: `${server.url}dl/checksums.txt` })
         return Response.json({ tag_name: rel.tag, assets })
       }

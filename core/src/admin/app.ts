@@ -1802,7 +1802,8 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
       h('button', { class: 'btn', onclick: () => (location.hash = '#/') }, 'Пропустить - оставить по умолчанию'),
     )
   } else if (!ro || !mro) buttons.append(h('button', { class: 'btn primary', onclick: () => save() }, 'Сохранить'))
-  page.append(authForm, mailForm, buttons, first ? null : base)
+  page.append(authForm, mailForm, buttons)
+  if (!first && base) page.append(base)
 }
 
 void route().catch(fail)

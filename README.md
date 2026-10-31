@@ -821,9 +821,14 @@ design.md  решения и причины
 ```bash
 cd core && bun install
 bun run test        # все тесты
+bun run typecheck   # tsc --noEmit: strict + noUncheckedIndexedAccess
 bun run build       # core/dist/mabase под эту машину
 bun run release     # архивы под все платформы и checksums.txt
 ```
+
+Проверка типов - в CI на каждой правке (`.github/workflows/ci.yml`). Раньше
+`tsconfig.json` обещал `strict`, но ничего его не проверяло: Bun типы просто
+вырезает.
 
 Релиз выпускается тегом `vX.Y.Z`: GitHub Actions прогонит тесты, соберёт
 архивы и выложит релиз. Номер версии - в `core/src/version.ts`, что нового -

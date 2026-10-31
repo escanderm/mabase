@@ -58,10 +58,11 @@ export async function update(o: UpdateOptions): Promise<UpdateResult> {
   const [archive, sumsText] = await Promise.all([download(asset.browser_download_url, headers), download(sums.browser_download_url, headers).then((b) => new TextDecoder().decode(b))])
   const want = sumsText.split('\n').map((l) => l.trim().split(/\s+\*?/)).find(([, file]) => file === name)?.[0]
   if (!want) throw new Error(`в checksums.txt нет строки для ${name}`)
-  const got = new Bun.CryptoHasher('sha256').update(archive).digest('hex')
+  // Bun требует Uint8Array<ArrayBuffer>, download отдаёт ArrayBufferLike: те же байты
+  const got = new Bun.CryptoHasher('sha256').update(archive as unknown as Uint8Array<ArrayBuffer>).digest('hex')
   if (got !== want.toLowerCase()) throw new Error(`контрольная сумма ${name} не совпала: архив повреждён или подменён. Ничего не изменено`)
 
-  const bin = untarFile(Bun.gunzipSync(archive), 'mabase')
+  const bin = untarFile(Bun.gunzipSync(archive as unknown as Uint8Array<ArrayBuffer>), 'mabase')
   if (!bin) throw new Error(`в ${name} нет файла mabase`)
 
   // Рядом с exe: rename работает только в пределах одного диска

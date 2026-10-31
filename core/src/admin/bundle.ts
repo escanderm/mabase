@@ -1,8 +1,13 @@
 // Файлы админки /_/: страница, стили и скрипт. В бинарнике скрипт вшит
 // (build.ts кладёт сборку в generated/admin.ts), из исходников - собирается
 // при первом запросе, как SDK.
-import css from './style.css' with { type: 'text' }
-import html from './index.html' with { type: 'text' }
+import cssRaw from './style.css' with { type: 'text' }
+import htmlRaw from './index.html' with { type: 'text' }
+
+// Bun объявляет *.html как HTMLBundle (сборка фронтенда), но здесь импорт с
+// type: 'text' - это строка. CSS в типах Bun нет вовсе (css.d.ts).
+const css = cssRaw as unknown as string
+const html = htmlRaw as unknown as string
 
 const compiled = import.meta.url.includes('$bunfs')
 let js: Promise<string> | null = null

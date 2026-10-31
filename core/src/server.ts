@@ -281,7 +281,7 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
           })
         : () => {}
     type WsData = { conn?: Conn }
-    const server = Bun.serve<WsData, {}>({
+    const server = Bun.serve<WsData>({
       port: cfg.port ?? 8090,
       hostname: cfg.hostname,
       maxRequestBodySize: (cfg.http?.maxImportBytes ?? 256 << 20) + 1024,
