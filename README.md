@@ -314,6 +314,13 @@ img.src = mb.fileUrl(doc.avatar)
 Файлы `mabase.config.ts` и `mb_hooks/*.ts` импортируют модуль `mabase` - он
 встроен в исполняемый файл, `node_modules` не нужен.
 
+**Подсказки в редакторе.** При запуске MaBase пишет в `mb_data/types.d.ts`
+типы своего API и рядом - типы zod (около 700 КБ на 125 файлов; переписываются
+только при изменении). Поэтому `import { defineCollection, z, on } from 'mabase'`
+подсказывается без `node_modules`, а `z.object(...)` проверяется по-настоящему.
+Если у проекта есть свой `tsconfig.json`, добавьте `mb_data/types.d.ts` в
+`include`.
+
 ### mabase.config.ts
 
 ```ts

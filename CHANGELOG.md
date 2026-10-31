@@ -1,5 +1,15 @@
 # Изменения
 
+## 0.2.3
+
+- Автодополнение в редакторе: при старте MaBase пишет `mb_data/types.d.ts` и
+  рядом типы zod (вшиты в бинарник, 124 файла). `z`, `defineCollection`,
+  `defineConfig`, `defineAction`, `defineSeed`, `on`, `mail`, `ActionError` и
+  типы `Db`, `Hooks`, `Rules`, `files`, `origin` подсказываются без
+  `node_modules`; переписывается только изменившееся.
+- Проверено `tsc --strict` на примере конфига с коллекциями, правилами,
+  хуками, действием и сидом: 0 ошибок.
+
 ## 0.2.2
 
 - Файлы: поле-файл в коллекции (`files: { avatar: { maxBytes, accept, many } }`),

@@ -15,6 +15,7 @@ import { Bus, type Handler } from './bus'
 import { Mailer, type MailMessage, type MailOptions } from './mail'
 import { checkEvents, PRESENCE, Realtime, type Conn, type EventConfig } from './realtime'
 import { Scheduler, type SchedulerOptions } from './scheduler'
+import { writeEditorTypes } from './editor'
 import { attachFileCleanup, FILES, FileStore } from './files'
 import { maskSecrets, Tail } from './tail'
 import { createAdminApi } from './admin-api'
@@ -95,6 +96,13 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
   }
   if (cfg.events) checkEvents(cfg.events) // ошибка в конфиге событий - до открытия базы
   mkdirSync(cfg.dataDir, { recursive: true })
+  // Типы для редактора: <dataDir>/types.d.ts и типы zod (design.md §5).
+  // Не записались - не повод не запускаться.
+  try {
+    await writeEditorTypes(cfg.dataDir)
+  } catch (err) {
+    warn(`типы для редактора не записались: ${(err as Error).message}`)
+  }
   // Файлы: <dataDir>/files/<collection>/<recordId>/ (design.md §16).
   const files = new FileStore(join(cfg.dataDir, 'files'), cfg.http?.maxUploadBytes)
   const db = await openDb({

@@ -13,7 +13,7 @@
 // (bun-linux-arm64 и т.д.).
 import { $ } from 'bun'
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { VERSION } from './src/version'
 import { buildAdmin } from './src/admin/bundle'
@@ -40,6 +40,20 @@ writeFileSync('src/generated/client.ts', `// Сгенерировано build.ts
 await Bun.write('dist/client.js', sdk)
 // Скрипт админки /_/ - тоже внутрь
 writeFileSync('src/generated/admin.ts', `// Сгенерировано build.ts - не править\nexport default ${JSON.stringify(await buildAdmin())}\n`)
+
+// Типы zod для редактора: в бинарнике node_modules нет, поэтому .d.ts
+// вшиваются сюда (src/editor.ts пишет их в mb_data/types/zod).
+const zodTypes: Record<string, string> = {}
+const walkZod = (dir: string, rel: string) => {
+  for (const name of readdirSync(dir)) {
+    const abs = join(dir, name)
+    const next = rel ? `${rel}/${name}` : name
+    if (statSync(abs).isDirectory()) walkZod(abs, next)
+    else if (name.endsWith('.d.ts')) zodTypes[next] = readFileSync(abs, 'utf8')
+  }
+}
+walkZod(join(import.meta.dir, 'node_modules', 'zod'), '')
+writeFileSync('src/generated/zod-types.ts', `// Сгенерировано build.ts - не править\nexport default ${JSON.stringify(zodTypes)} as Record<string, string>\n`)
 
 async function compile(out: string, target?: string): Promise<void> {
   const local = target && process.env.BUN_TARGETS_DIR && join(process.env.BUN_TARGETS_DIR, target)
