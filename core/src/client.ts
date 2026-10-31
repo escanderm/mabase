@@ -109,14 +109,18 @@ export class MabaseClient {
 
   // HTTP с токеном. 401 при токене - обновить токен и повторить один раз.
   async request<T = any>(method: string, path: string, body?: unknown, retry = true): Promise<T> {
+    return this.send<T>(method, path, body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, retry)
+  }
+
+  /** @internal */ async send<T = any>(method: string, path: string, init: { headers?: Record<string, string>; body?: BodyInit } = {}, retry = true): Promise<T> {
     await this.auth.fresh()
     const token = this.auth.session?.accessToken
     const res = await this.opts.fetch(this.url + path, {
       method,
-      headers: { ...(body !== undefined && { 'Content-Type': 'application/json' }), ...(token && { Authorization: `Bearer ${token}` }) },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { ...init.headers, ...(token && { Authorization: `Bearer ${token}` }) },
+      body: init.body,
     })
-    if (res.status === 401 && token && retry && (await this.auth.refresh())) return this.request(method, path, body, false)
+    if (res.status === 401 && token && retry && (await this.auth.refresh())) return this.send(method, path, init, false)
     const text = await res.text()
     let data: any = null
     try {
@@ -126,6 +130,11 @@ export class MabaseClient {
     }
     if (!res.ok) throw new MabaseError(data?.code ?? 'internal', data?.message ?? `HTTP ${res.status}`, res.status, data?.details)
     return data
+  }
+
+  // Ссылка на файл: /api/files/:id (проверка правила view - на сервере).
+  fileUrl(id: string): string {
+    return `${this.url}/api/files/${encodeURIComponent(id)}`
   }
 
   action<R = any>(name: string, input?: unknown): Promise<R> {
@@ -411,12 +420,17 @@ export class CollectionClient<T extends Doc = Doc> {
     return this.mb.request('GET', `${this.base}/${encodeURIComponent(id)}${query({}, opts)}`)
   }
 
-  insert(doc: Partial<T> & Record<string, unknown>): Promise<T> {
-    return this.mb.request('POST', this.base, doc)
+  // files: поле-файл -> File (или массив File при many). Поля документа уходят
+  // JSON-строками, файлы - частями формы; значение поля-файла ставит сервер.
+  insert(doc: Partial<T> & Record<string, unknown>, opts: { files?: Record<string, File | File[]> } = {}): Promise<T> {
+    if (!opts.files) return this.mb.request('POST', this.base, doc)
+    return this.mb.send('POST', this.base, { body: formData(doc, opts.files) })
   }
 
-  update(id: string, ops: Record<string, unknown>): Promise<T> {
-    return this.mb.request('PATCH', `${this.base}/${encodeURIComponent(id)}`, ops)
+  update(id: string, ops: Record<string, unknown>, opts: { files?: Record<string, File | File[]> } = {}): Promise<T> {
+    const path = `${this.base}/${encodeURIComponent(id)}`
+    if (!opts.files) return this.mb.request('PATCH', path, ops)
+    return this.mb.send('PATCH', path, { body: formData(ops, opts.files) })
   }
 
   remove(id: string): Promise<void> {
@@ -815,6 +829,14 @@ function getValue(doc: Doc, path: string): unknown {
   let cur: any = doc
   for (const p of path.split('.')) cur = cur?.[p]
   return cur
+}
+
+// Тело multipart: поля - JSON-строками (сервер разберёт), файлы - частями.
+function formData(doc: Record<string, unknown>, files: Record<string, File | File[]>): FormData {
+  const f = new FormData()
+  for (const [k, v] of Object.entries(doc)) f.append(k, JSON.stringify(v))
+  for (const [k, v] of Object.entries(files)) for (const file of Array.isArray(v) ? v : [v]) f.append(k, file, file.name)
+  return f
 }
 
 const and = (a: Record<string, unknown>, b: Record<string, unknown>) =>

@@ -14,6 +14,7 @@ import { clientErrors, type Access } from './access'
 import { toClientError, type Actions } from './actions'
 import { USERS, type Auth } from './auth'
 import { parseExpand } from './expand'
+import type { Upload } from './files'
 import { importNdjson } from './import'
 import { sdkBundle } from './sdk'
 import type { User } from './db'
@@ -32,6 +33,7 @@ export type HttpOptions = {
   trustProxy?: boolean // IP клиента - последний в X-Forwarded-For (его дописал свой прокси)
   maxBodyBytes?: number // 1 МБ
   maxImportBytes?: number // импорт через admin: 256 МБ
+  maxUploadBytes?: number // multipart-загрузка: 100 МБ
   adminToken?: string // /api/admin/*; нет - admin выключен
   tail?: Tail // GET /api/admin/tail - поток для mabase tail
   adminApi?: ReturnType<typeof createAdminApi> // /api/_/* и интерфейс /_/; нет - админки нет
@@ -90,6 +92,7 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
   const db = access.db
   const maxBody = opts.maxBodyBytes ?? 1 << 20
   const maxImport = opts.maxImportBytes ?? 256 << 20
+  const maxUpload = opts.maxUploadBytes ?? 100 << 20
   const onError = opts.onError ?? ((err, info) => console.error(`[mabase] ${info.method} ${info.path}`, err))
   const logged = new WeakSet<object>() // ошибки действий Actions уже записал в журнал
   const publicDir = opts.publicDir && existsSync(opts.publicDir) ? realpathSync(opts.publicDir) : null
@@ -183,9 +186,54 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
       }
     }
 
+    // Тело записи: JSON или multipart/form-data. В multipart текстовые части -
+    // поля документа (значение - JSON), файловые - в поля из collection.files.
+    const parseBody = async (): Promise<{ doc: any; files: Record<string, Upload[]> }> => {
+      const type = req.headers.get('content-type') ?? ''
+      if (!/^multipart\/form-data/i.test(type)) return { doc: await body(), files: {} }
+      const len = Number(req.headers.get('content-length') ?? 0)
+      if (len > maxUpload) throw new HttpError(413, 'too_large', `Загрузка больше ${maxUpload} байт`)
+      let form: FormData
+      try {
+        form = await req.formData()
+      } catch {
+        throw bad('Тело multipart не разобралось')
+      }
+      const doc: Record<string, unknown> = {}
+      const files: Record<string, Upload[]> = {}
+      for (const [k, v] of form.entries()) {
+        if (typeof v === 'string') {
+          try {
+            doc[k] = JSON.parse(v)
+          } catch {
+            doc[k] = v
+          }
+        } else {
+          const bytes = new Uint8Array(await v.arrayBuffer())
+          if (bytes.byteLength > maxUpload) throw new HttpError(413, 'too_large', `Файл ${v.name || ''} больше ${maxUpload} байт`)
+          ;(files[k] ??= []).push({ name: v.name, type: v.type, bytes })
+        }
+      }
+      return { doc, files }
+    }
+
     if (route === 'GET health' && parts.length === 1) return json({ ok: true })
     if (route === 'GET client.js' && parts.length === 1) {
       return new Response(await sdkBundle(), { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=300' } })
+    }
+
+    if (parts[0] === 'files' && parts.length === 2 && method === 'GET') {
+      const { meta, bytes } = await access.forUser(await user()).file(parts[1])
+      const name = encodeURIComponent(meta.name)
+      const disposition = url.searchParams.get('download') ? 'attachment' : 'inline'
+      return new Response(bytes, {
+        headers: {
+          'Content-Type': meta.mime,
+          'Content-Length': String(meta.size),
+          'Content-Disposition': `${disposition}; filename*=UTF-8''${name}`,
+          'Cache-Control': 'private, max-age=300',
+        },
+      })
     }
 
     if (parts[0] === 'c' && parts[1]) {
@@ -204,7 +252,10 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
           for (const k of q.keys()) if (!RESERVED_PARAMS.has(k)) throw bad(`неизвестный параметр ${k}`)
           return json(await coll.list(filter, { sort, limit, fields, expand: parseExpand(q.get('expand')) }))
         }
-        if (method === 'POST') return json(await coll.insert(await body()))
+        if (method === 'POST') {
+          const { doc, files } = await parseBody()
+          return json(await coll.insert(doc, { files }))
+        }
       }
       if (parts.length === 3) {
         const id = parts[2]!
@@ -212,7 +263,10 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
           const q = url.searchParams
           return json(await coll.get(id, { fields: q.get('fields')?.split(',').filter(Boolean), expand: parseExpand(q.get('expand')) }))
         }
-        if (method === 'PATCH') return json(await coll.update(id, await body()))
+        if (method === 'PATCH') {
+          const { doc, files } = await parseBody()
+          return json(await coll.update(id, doc, { files }))
+        }
         if (method === 'DELETE') {
           await coll.remove(id)
           return noContent()

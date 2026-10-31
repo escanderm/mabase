@@ -4,7 +4,9 @@
 import { project, type CollectionApi, type Db, type Doc, type FindOptions, type Query, type Update, type User } from './db'
 import { ActionError, NotFoundError, QueryError, ValidationError } from './errors'
 import { expandDocs } from './expand'
+import { FILES, type FileFields, type FileMeta, type FileStore, type Upload } from './files'
 import { forbiddenSegment } from './paths'
+import { ulid } from './ulid'
 import { applyUpdate, SYSTEM_FIELDS, validateQuery, validateUpdate } from './query'
 
 type Collections = Record<string, CollectionApi>
@@ -32,7 +34,7 @@ export type Fields = {
   hidden?: string[] // не уходит наружу никогда, даже владельцу
 }
 
-export type AccessDef = { rules?: Rules; fields?: Fields; owner?: string }
+export type AccessDef = { rules?: Rules; fields?: Fields; owner?: string; files?: FileFields }
 
 export type ClientLimits = {
   defaultLimit: number // limit не указан
@@ -50,6 +52,7 @@ type Resolved = {
   immutable: Set<string>
   private: Set<string>
   hidden: Set<string>
+  files: FileFields
   owner: string | null // поле с id владельца; у users - сама запись
 }
 
@@ -120,6 +123,8 @@ export type AccessOptions = {
   // mabase serve --dev: правило list/view читает коллекцию не из dependsOn -
   // предупредить. Иначе подписки не узнают, что доступ изменился (design.md §11).
   onRuleWarning?: (message: string) => void
+  // Хранилище файлов; нет - поля-файлы и загрузка недоступны.
+  files?: FileStore
 }
 
 export class Access {
@@ -147,12 +152,22 @@ export class Access {
       immutable: set('immutable'),
       private: set('private'),
       hidden: set('hidden'),
+      files: def.files ?? {},
       owner: isUsers ? '_id' : (def.owner ?? null),
     }
     for (const k of ['readonly', 'immutable', 'private', 'hidden'] as const) {
       for (const field of r[k]) {
         if (field.includes('.')) throw new TypeError(`${name}: fields.${k} - только поля верхнего уровня, "${field}" нельзя`)
         if ((SYSTEM_FIELDS as readonly string[]).includes(field)) throw new TypeError(`${name}: ${field} - служебное поле`)
+      }
+    }
+    for (const [field, def] of Object.entries(r.files)) {
+      if (field.includes('.')) throw new TypeError(`${name}: files.${field} - только поля верхнего уровня`)
+      if ((SYSTEM_FIELDS as readonly string[]).includes(field)) throw new TypeError(`${name}: ${field} - служебное поле`)
+      if (!def || typeof def !== 'object') throw new TypeError(`${name}: files.${field} - объект { maxBytes?, accept?, many? }`)
+      if (def.maxBytes !== undefined && (!Number.isInteger(def.maxBytes) || def.maxBytes <= 0)) throw new TypeError(`${name}: files.${field}.maxBytes - целое больше нуля`)
+      if (def.accept !== undefined && (!Array.isArray(def.accept) || !def.accept.every((a) => typeof a === 'string' && a))) {
+        throw new TypeError(`${name}: files.${field}.accept - список mime-префиксов`)
       }
     }
     if (r.private.size && !r.owner) throw new TypeError(`${name}: fields.private требует owner - поле с id владельца`)
@@ -316,12 +331,39 @@ export class ClientSession {
     walk(filter)
   }
 
+  // Файл по id: виден, только если видна запись, к которой он приложен
+  // (правило view родительской коллекции). Нет доступа - 404, как и записи.
+  async file(id: unknown): Promise<{ meta: FileMeta; bytes: Uint8Array }> {
+    if (typeof id !== 'string' || !id) throw bad('id файла - строка')
+    const store = this.access.opts.files
+    const meta = (await this.access.db.c[FILES]!.findOne({ _id: id })) as FileMeta | null
+    if (!store || !meta) throw new ActionError('not_found', 'Файл не найден')
+    const rule = await this.ruleFilter(meta.collection, 'view').catch((err) => {
+      if (err instanceof ActionError) return false as const
+      throw err
+    })
+    if (rule === false) throw new ActionError('not_found', 'Файл не найден')
+    const parent = await this.access.db.c[meta.collection]!.findOne(and(rule, { _id: meta.recordId }))
+    if (!parent) throw new ActionError('not_found', 'Файл не найден')
+    try {
+      return { meta, bytes: store.read(meta) }
+    } catch {
+      throw new ActionError('not_found', 'Файл не найден')
+    }
+  }
+
   checkWrite(c: string, paths: string[], mode: 'create' | 'update', before?: Doc): void {
     const d = this.access._def(c)
     for (const path of paths) {
       assertFieldPath(path, 'поле')
       const root = path.split('.')[0]!
       if ((SYSTEM_FIELDS as readonly string[]).includes(root)) throw new ActionError('forbidden', `поле ${root} задаёт сервер`)
+      // Поле-файл приходит не значением, а загрузкой: значение (id) ставит сервер.
+      if (root in d.files) {
+        if (d.hidden.has(root) || d.readonly.has(root)) throw new ActionError('forbidden', `поле ${root} клиент не меняет`)
+        if (mode === 'update' && d.immutable.has(root)) throw new ActionError('forbidden', `поле ${root} задаётся только при создании`)
+        continue
+      }
       if (d.hidden.has(root) || d.readonly.has(root)) throw new ActionError('forbidden', `поле ${root} клиент не меняет`)
       if (mode === 'update' && d.immutable.has(root)) throw new ActionError('forbidden', `поле ${root} задаётся только при создании`)
       if (mode === 'update' && d.private.has(root) && !this.isOwner(c, before!)) throw new ActionError('forbidden', `поле ${root} меняет только владелец`)
@@ -414,34 +456,79 @@ export class ClientCollection {
     })
   }
 
-  insert(doc: unknown): Promise<Doc> {
+  insert(doc: unknown, opts: { files?: Record<string, Upload[]> } = {}): Promise<Doc> {
     return clientErrors(async () => {
       if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw bad('документ должен быть объектом')
-      this.s.checkWrite(this.name, Object.keys(doc), 'create')
-      const db = this.s.access.db
-      const saved = await db.transaction(async (tx) => {
-        await this.s.check(this.name, 'create', { doc: structuredClone(doc), db: tx.c })
-        return tx.c[this.name]!.insert(doc as Record<string, unknown>)
-      }, { user: this.s.user, origin: 'api' })
-      return this.s.strip(this.name, saved)
+      const def = this.s.access._def(this.name)
+      const store = this.s.access.opts.files
+      const uploads = this.prepareUploads(def.files, store, opts.files, (doc as Record<string, unknown>))
+      const id = typeof (doc as any)._id === 'string' ? (doc as any)._id : ulid()
+      // Файлы - на диск до транзакции: откат удалит их, а метаданные в _files
+      // попали бы в ту же строку лога, что и запись.
+      const saved = uploads ? store!.save(this.name, id, def.files, uploads) : null
+      try {
+        // Поля-файлы приходят загрузкой, их значения (id) пишет сервер; всё
+        // остальное - как обычно: скрытое и readonly клиент не задаёт.
+        this.s.checkWrite(this.name, [...Object.keys(doc as object), ...Object.keys(saved?.values ?? {})], 'create')
+        const db = this.s.access.db
+        const out = await db.transaction(async (tx) => {
+          for (const m of saved?.metas ?? []) await tx.c[FILES]!.insert(m as unknown as Record<string, unknown>)
+          const full = { ...(doc as Record<string, unknown>), _id: id, ...(saved?.values ?? {}) }
+          await this.s.check(this.name, 'create', { doc: structuredClone(full), db: tx.c })
+          return tx.c[this.name]!.insert(full)
+        }, { user: this.s.user, origin: 'api' })
+        return this.s.strip(this.name, out)
+      } catch (err) {
+        if (saved) store!.removeMany(saved.metas)
+        throw err
+      }
     })
   }
 
-  update(id: string, update: unknown): Promise<Doc> {
+  // Загрузки: только в объявленные поля-файлы, и только загрузкой - значение
+  // (id файла) ставит сервер. Иначе клиент мог бы сослаться на чужой файл.
+  private prepareUploads(def: FileFields, store: FileStore | undefined, uploads: Record<string, Upload[]> | undefined, doc: Record<string, unknown>): Record<string, Upload[]> | null {
+    const list = uploads ?? {}
+    for (const [field, value] of Object.entries(list)) {
+      if (!(field in def)) throw bad(`${this.name}: поле ${field} не объявлено как файл (files)`)
+      if (!value?.length) throw bad(`${this.name}: поле ${field} - пустая загрузка`)
+    }
+    const provided = Object.keys(list).filter((f) => list[f]!.length)
+    for (const field of Object.keys(doc)) {
+      if (field in def && !provided.includes(field)) throw bad(`${this.name}.${field}: файл загружается, а не задаётся значением`)
+    }
+    if (!provided.length) return null
+    if (!store) throw bad('файлы не настроены на сервере')
+    return Object.fromEntries(provided.map((f) => [f, list[f]!]))
+  }
+
+  update(id: string, update: unknown, opts: { files?: Record<string, Upload[]> } = {}): Promise<Doc> {
     return clientErrors(async () => {
       validateUpdate(update)
-      const db = this.s.access.db
-      const saved = await db.transaction(async (tx) => {
-        // видимость и правило - в той же транзакции, что запись: между проверкой и записью ничего не изменится
-        const view = await this.s.ruleFilter(this.name, 'view', tx.c)
-        const before = await tx.c[this.name]!.findOne(and(view, { _id: id }))
-        if (!before) throw new ActionError('not_found', 'Запись не найдена')
-        this.s.checkWrite(this.name, Object.values(update as Update).flatMap((f) => Object.keys(f ?? {})), 'update', before)
-        const after = applyUpdate(before, update as Update)
-        await this.s.check(this.name, 'update', { before, after, db: tx.c })
-        return tx.c[this.name]!.update(id, update as Update)
-      }, { user: this.s.user, origin: 'api' })
-      return this.s.strip(this.name, saved)
+      const def = this.s.access._def(this.name)
+      const store = this.s.access.opts.files
+      const uploads = this.prepareUploads(def.files, store, opts.files, (update as any).$set ?? {})
+      const saved = uploads ? store!.save(this.name, id, def.files, uploads) : null
+      // Значение поля-файла меняется через $set: новые id приходят из загрузки.
+      const upd = saved ? { ...(update as object), $set: { ...(update as Update).$set, ...saved.values } } : (update as Update)
+      try {
+        const db = this.s.access.db
+        const out = await db.transaction(async (tx) => {
+          for (const m of saved?.metas ?? []) await tx.c[FILES]!.insert(m as unknown as Record<string, unknown>)
+          // видимость и правило - в той же транзакции, что запись: между проверкой и записью ничего не изменится
+          const view = await this.s.ruleFilter(this.name, 'view', tx.c)
+          const before = await tx.c[this.name]!.findOne(and(view, { _id: id }))
+          if (!before) throw new ActionError('not_found', 'Запись не найдена')
+          this.s.checkWrite(this.name, Object.values(upd).flatMap((f) => Object.keys(f ?? {})), 'update', before)
+          const after = applyUpdate(before, upd)
+          await this.s.check(this.name, 'update', { before, after, db: tx.c })
+          return tx.c[this.name]!.update(id, upd)
+        }, { user: this.s.user, origin: 'api' })
+        return this.s.strip(this.name, out)
+      } catch (err) {
+        if (saved) store!.removeMany(saved.metas)
+        throw err
+      }
     })
   }
 

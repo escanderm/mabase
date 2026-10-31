@@ -15,6 +15,7 @@ import { Bus, type Handler } from './bus'
 import { Mailer, type MailMessage, type MailOptions } from './mail'
 import { checkEvents, PRESENCE, Realtime, type Conn, type EventConfig } from './realtime'
 import { Scheduler, type SchedulerOptions } from './scheduler'
+import { attachFileCleanup, FILES, FileStore } from './files'
 import { maskSecrets, Tail } from './tail'
 import { createAdminApi } from './admin-api'
 import { Superusers, type SuperuserOptions } from './superusers'
@@ -66,7 +67,20 @@ export function loadSecret(dataDir: string, env: Record<string, string | undefin
   return secret
 }
 
-export type App = { db: Db; access: Access; auth: Auth; actions: Actions; mail: Mailer; tail: Tail; bus: Bus; superusers: Superusers; settings: Settings; registry: Registry; close: () => Promise<void> }
+export type App = {
+  db: Db
+  access: Access
+  auth: Auth
+  actions: Actions
+  mail: Mailer
+  tail: Tail
+  bus: Bus
+  superusers: Superusers
+  settings: Settings
+  registry: Registry
+  files: FileStore
+  close: () => Promise<void>
+}
 
 // База, доступ, вход и действия - без HTTP. Для сида и импорта при
 // остановленном сервере и как основа startServer.
@@ -81,6 +95,8 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
   }
   if (cfg.events) checkEvents(cfg.events) // ошибка в конфиге событий - до открытия базы
   mkdirSync(cfg.dataDir, { recursive: true })
+  // Файлы: <dataDir>/files/<collection>/<recordId>/ (design.md §16).
+  const files = new FileStore(join(cfg.dataDir, 'files'), cfg.http?.maxUploadBytes)
   const db = await openDb({
     ...cfg.db,
     dir: join(cfg.dataDir, 'db'),
@@ -95,6 +111,10 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
       for (const ch of info.changes) ops[ch.c] = (ops[ch.c] ?? 0) + 1
       tail.publish('commit', { tx: info.tx, holdMs: info.holdMs, user: info.user?.id, ops, events: info.events.map((e) => e.event) })
     })
+    // Метаданные файлов: _files. Клиентам закрыта (нет правил), админке видна.
+    db.collection(FILES, { indexes: ['recordId'] })
+    const fileDefs = (c: string) => (cfg.collections ?? {})[c]?.files
+    attachFileCleanup({ db, files, defs: fileDefs, onError })
     const { [USERS]: usersCfg, ...others } = cfg.collections ?? {}
     const accessDefs: Record<string, AccessDef> = {}
     // _presence - соединения: { _id: id соединения, userId, connectedAt } (design.md §12)
@@ -102,10 +122,11 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
     for (const [name, c] of Object.entries(others)) {
       const indexes = name === PRESENCE ? [...new Set([...(c.indexes ?? []), 'userId'])] : c.indexes
       db.collection(name, { schema: c.schema, indexes, hooks: c.hooks, relations: c.relations })
-      accessDefs[name] = { rules: c.rules, fields: c.fields, owner: c.owner }
+      accessDefs[name] = { rules: c.rules, fields: c.fields, owner: c.owner, files: c.files }
     }
-    if (usersCfg) accessDefs[USERS] = { rules: usersCfg.rules, fields: usersCfg.fields }
+    if (usersCfg) accessDefs[USERS] = { rules: usersCfg.rules, fields: usersCfg.fields, files: usersCfg.files }
     const access = new Access(db, accessDefs, cfg.limits, {
+      files,
       onRuleWarning: cfg.dev
         ? (m) => {
             tail.publish('warning', { message: m })
@@ -159,6 +180,7 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
       superusers,
       settings,
       registry,
+      files,
       close: async () => {
         await auth.settled()
         await bus.settled()

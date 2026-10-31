@@ -1,5 +1,17 @@
 # Изменения
 
+## 0.2.2
+
+- Файлы: поле-файл в коллекции (`files: { avatar: { maxBytes, accept, many } }`),
+  загрузка в том же запросе, что и запись (`multipart/form-data`), метаданные в
+  `_files`, байты в `<dataDir>/files/<collection>/<recordId>/`.
+- Отдача `GET /api/files/:id` через правило `view` родительской записи;
+  `?download=1` - вложением.
+- Замена файла и удаление записи убирают старые файлы; лимиты
+  `http.maxUploadBytes`, `files.<поле>.maxBytes` и `accept`.
+- SDK: `insert(doc, { files })`, `update(id, update, { files })`, `fileUrl(id)`.
+- Код ошибки `too_large` (413) для больших файлов и тел запросов.
+
 ## 0.2.1
 
 Патч безопасности поверх 0.2.0. Данных и миграций не касается, но часть
