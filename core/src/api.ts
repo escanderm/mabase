@@ -3,6 +3,7 @@
 import { z } from 'zod'
 import type { AccessDef } from './access'
 import { defineAction, type ActionDef } from './actions'
+import { checkCron } from './cron'
 import type { Auth, AuthOptions } from './auth'
 import type { CollectionApi, CollectionDef, DbOptions } from './db'
 import { ActionError } from './errors'
@@ -78,6 +79,25 @@ export function eventHandlers(): ReadonlyMap<string, readonly EventHandler[]> {
   return handlers
 }
 
+// ---------- периодические задачи (design.md §13) ----------
+export type ScheduleDef = { event: string; cron: string; data?: unknown }
+const schedules: ScheduleDef[] = []
+
+// schedule('digest.daily', '0 9 * * *', { to: 'team' }) в mabase.config.ts или
+// mb_hooks/*.ts: сервер поставит задачу в _scheduled и будет повторять её по
+// cron (локальное время сервера). Обработчик - обычный on('digest.daily').
+export function schedule(event: string, cron: string, data?: unknown): void {
+  if (typeof event !== 'string' || !event) throw new TypeError('schedule(событие, cron, данные)')
+  if (typeof cron !== 'string') throw new TypeError(`schedule(${event}): cron - строка, например '0 9 * * *'`)
+  checkCron(cron)
+  if (schedules.some((s) => s.event === event)) throw new TypeError(`schedule: ${event} уже запланировано`)
+  schedules.push({ event, cron, ...(data !== undefined && { data }) })
+}
+
+export function scheduledTasks(): readonly ScheduleDef[] {
+  return schedules
+}
+
 // ---------- почта для хуков и действий ----------
 // import { mail } from 'mabase'; await mail.send({ to, subject, text })
 
@@ -97,5 +117,6 @@ export function bindMailer(m: Mailer | null): void {
 // Сбросить состояние модуля (тесты, повторная загрузка конфига).
 export function resetApi(): void {
   handlers.clear()
+  schedules.length = 0
   currentMailer = null
 }

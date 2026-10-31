@@ -17,6 +17,7 @@ import * as api from './api'
 import { openDb } from './db'
 import { LockedError } from './errors'
 import { importNdjson } from './import'
+import { applyMigrations, loadMigrations } from './migrations'
 import { formatTail } from './tail'
 import { superuserCommand } from './superusers'
 import { runWizard, terminalIO } from './wizard'
@@ -184,6 +185,23 @@ export async function run(argv: string[], out: (line: string) => void = console.
       }
       return
     }
+    case 'migrate': {
+      // Миграции - при остановленном сервере: они пишут в базу напрямую.
+      const { config } = await loadProject(flags)
+      const app = await openApp(config).catch(lockedHint)
+      try {
+        const list = await loadMigrations(join(flags.root, 'mb_migrations'))
+        if (!list.length) {
+          out('Миграций нет: папка mb_migrations пуста или её нет')
+          return
+        }
+        const r = await applyMigrations(app.db, list, { onApply: (name) => out(`  применена ${name}`) })
+        out(r.applied.length ? `Применено миграций: ${r.applied.length}, уже было: ${r.skipped}` : `Всё уже применено: ${r.skipped} миграций`)
+      } finally {
+        await app.close()
+      }
+      return
+    }
     case 'backup': {
       const dest = args[0]
       if (!dest) throw new UsageError('mabase backup <папка>')
@@ -282,7 +300,7 @@ export async function run(argv: string[], out: (line: string) => void = console.
 }
 
 function lockedHint(err: unknown): never {
-  if (err instanceof LockedError) throw new Error(`${err.message}. Сид пишет в базу напрямую - остановите сервер`)
+  if (err instanceof LockedError) throw new Error(`${err.message}. Сид и миграции пишут в базу напрямую - остановите сервер`)
   throw err
 }
 
@@ -291,6 +309,7 @@ const HELP = `MaBase ${VERSION}
   mabase serve  [--port 8090] [--host 0.0.0.0] [--dir mb_data] [--public mb_public] [--dev]
                 --dev - предупреждать, если правило читает коллекцию не из dependsOn
   mabase seed   - выполнить seed.ts (сервер должен быть остановлен)
+  mabase migrate - применить миграции из mb_migrations/ (сервер остановлен)
   mabase backup <папка>
   mabase import <коллекция> <файл.ndjson>
   mabase tail   - живой журнал работающего сервера: коммиты, действия, события, ошибки

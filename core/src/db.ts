@@ -30,7 +30,7 @@ export type User = { readonly id: string; readonly roles?: readonly string[] }
 
 // Кто вызвал запись (design.md §9): клиент, действие, хук, сид или сам сервер.
 // Хук видит origin и может не реагировать на свои же изменения: origin === 'hook'.
-export type Origin = 'api' | 'action' | 'hook' | 'system' | 'seed'
+export type Origin = 'api' | 'action' | 'hook' | 'system' | 'seed' | 'migration'
 
 type BeforeCtx = { db: Db; signal: AbortSignal; depth: number; user: User | null; origin: Origin }
 export type Hooks = {
@@ -118,6 +118,7 @@ export type TxApi = {
 }
 
 export const SCHEDULED = '_scheduled'
+export const MIGRATIONS = '_migrations'
 
 // '0s', '500ms', '5m', '2h', '1d' или миллисекунды числом.
 export function parseDuration(v: number | string): number {
@@ -302,6 +303,7 @@ export class Db {
     }
     for (const c of data.keys()) this.state(c)
     this.collection(SCHEDULED, { indexes: ['key', 'runAt'] })
+    this.collection(MIGRATIONS, {}) // применённые миграции (design.md §15)
     this.c = new Proxy({} as Record<string, CollectionApi>, {
       get: (_, name) => (typeof name === 'string' ? new CollectionApi(this, name, null) : undefined),
     })

@@ -12,9 +12,36 @@
 //   task.runAt и сам решает, не устарело ли.
 // - Нет обработчика - тоже ошибка: опечатка в имени события будет видна.
 import type { Handler, TaskInfo } from './bus'
+import { nextCronRun } from './cron'
 import { SCHEDULED, type Db, type Doc } from './db'
 import { NotFoundError } from './errors'
 import type { Tail } from './tail'
+
+// Периодические задачи (schedule в конфиге или хуках): одна задача на событие,
+// key = cron:<событие>. Просроченная - выполнится при старте; после успеха
+// получает следующее время, а не удаляется.
+export async function ensureSchedules(db: Db, list: readonly { event: string; cron: string; data?: unknown }[]): Promise<void> {
+  for (const s of list) {
+    const key = `cron:${s.event}`
+    await db.transaction(async (tx) => {
+      const data = s.data === undefined ? null : s.data
+      const runAt = nextCronRun(s.cron, Date.now())
+      let existing = await tx.c[SCHEDULED]!.findOne({ key })
+      if (existing?.failed) {
+        // Проваленная задача cron не останавливает: начинаем заново.
+        await tx.c[SCHEDULED]!.remove(existing._id)
+        existing = null
+      }
+      if (!existing) {
+        await tx.c[SCHEDULED]!.insert({ event: s.event, data, runAt, key, cron: s.cron, attempts: 0 })
+        return
+      }
+      const set: Record<string, unknown> = { event: s.event, cron: s.cron, data }
+      if (!(Number(existing.runAt) > Date.now())) set.runAt = runAt
+      await tx.c[SCHEDULED]!.update(existing._id, { $set: set })
+    }, { origin: 'system' })
+  }
+}
 
 export type SchedulerOptions = {
   maxAttempts?: number // 5
@@ -151,10 +178,19 @@ export class Scheduler {
           handler,
           new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error(`таймаут ${this.o.timeoutMs} мс`)), { once: true })),
         ])
-        await this.db.c[SCHEDULED]!.remove(t._id).catch((err) => {
-          if (!(err instanceof NotFoundError)) throw err
-        })
-        this.o.tail?.publish('task', { event: t.event, id: t._id, attempt, ms: Math.round(performance.now() - t0), ok: true })
+        // Периодическая задача после успеха получает следующее время, обычная -
+        // удаляется (key освобождается).
+        const next = typeof t.cron === 'string' ? nextCronRun(t.cron, Date.now()) : null
+        if (next) {
+          await this.db.c[SCHEDULED]!.update(t._id, { $set: { runAt: next, attempts: 0 }, $unset: { lastError: '' } }).catch((err) => {
+            if (!(err instanceof NotFoundError)) throw err
+          })
+        } else {
+          await this.db.c[SCHEDULED]!.remove(t._id).catch((err) => {
+            if (!(err instanceof NotFoundError)) throw err
+          })
+        }
+        this.o.tail?.publish('task', { event: t.event, id: t._id, attempt, ms: Math.round(performance.now() - t0), ok: true, ...(next ? { next } : {}) })
       } catch (err) {
         if (handler) await handler.catch(() => {}) // дождаться брошенного обработчика
         await this.failed(t, attempt, err, performance.now() - t0)

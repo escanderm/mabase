@@ -14,7 +14,8 @@ import { createHandler, type HttpOptions } from './http'
 import { Bus, type Handler } from './bus'
 import { Mailer, type MailMessage, type MailOptions } from './mail'
 import { checkEvents, PRESENCE, Realtime, type Conn, type EventConfig } from './realtime'
-import { Scheduler, type SchedulerOptions } from './scheduler'
+import { Scheduler, ensureSchedules, type SchedulerOptions } from './scheduler'
+import { scheduledTasks } from './api'
 import { writeEditorTypes } from './editor'
 import { attachFileCleanup, FILES, FileStore } from './files'
 import { maskSecrets, Tail } from './tail'
@@ -230,6 +231,9 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
       await rt.start()
     }
     const realtime = rt
+    // Периодические задачи из schedule(): по одной на событие, до старта
+    // планировщика - чтобы просроченные выполнились при старте.
+    if (scheduledTasks().length) await ensureSchedules(app.db, scheduledTasks())
     // Отложенные события выполняет только сервер: сид и импорт их не трогают.
     const scheduler = new Scheduler(app.db, cfg.handlers ?? (() => new Map()), {
       ...cfg.scheduler,
