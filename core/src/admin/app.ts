@@ -65,17 +65,32 @@ class ApiError extends Error {
 }
 
 const TOKEN_KEY = 'mabase.admin'
+const TOKEN_AT = 'mabase.admin.at'
+// Сессия администратора живёт 7 дней на сервере. Токен в localStorage без срока
+// переживал закрытие браузера на общей машине - храним и время выдачи.
+const TOKEN_TTL_MS = 7 * 24 * 3_600_000
 let token: string | null = null
-try {
-  token = localStorage.getItem(TOKEN_KEY)
-} catch {}
 function setToken(t: string | null): void {
   token = t
   try {
-    if (t) localStorage.setItem(TOKEN_KEY, t)
-    else localStorage.removeItem(TOKEN_KEY)
+    if (t) {
+      localStorage.setItem(TOKEN_KEY, t)
+      localStorage.setItem(TOKEN_AT, String(Date.now()))
+    } else {
+      localStorage.removeItem(TOKEN_KEY)
+      localStorage.removeItem(TOKEN_AT)
+    }
   } catch {}
 }
+try {
+  token = localStorage.getItem(TOKEN_KEY)
+  const at = Number(localStorage.getItem(TOKEN_AT) ?? 0)
+  if (token && at && Date.now() - at > TOKEN_TTL_MS) {
+    token = null
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(TOKEN_AT)
+  }
+} catch {}
 
 async function api<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/_/${path}`, {

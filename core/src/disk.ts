@@ -410,15 +410,24 @@ export class Disk {
     crashPoint('compact.afterCurrent')
 
     const oldGen = this.gen
-    await this.fh!.close()
+    const oldFh = this.fh
+    // Сначала публикуем новое состояние: CURRENT уже переключён, и писать в
+    // старый лог после этого нельзя. Ошибка close/unlink не должна оставлять
+    // в памяти старое поколение - иначе подтверждённые записи уйдут в файл,
+    // которого после рестарта не будет (design.md §6).
     this.fh = newLog
     this.gen = n
     this.logSize = header.length
     this.snapshotSize = snapshotBytes
     crashPoint('compact.beforeDeleteOld')
 
+    try {
+      await oldFh?.close()
+    } catch {}
     for (const f of [`snapshot.${oldGen}.jsonl`, `log.${oldGen}.jsonl`]) {
-      if (existsSync(this.p(f))) unlinkSync(this.p(f))
+      try {
+        if (existsSync(this.p(f))) unlinkSync(this.p(f))
+      } catch {}
     }
     this.syncDir()
     return true

@@ -585,7 +585,12 @@ export class Auth {
     if (typeof returnTo !== 'string' || !/^\/(?![/\\])[^\s#]{0,511}$/.test(returnTo)) throw bad('returnTo - путь на appUrl, начиная с /')
     const now = this.now()
     for (const [k, v] of this.oauthStates) if (v.expiresAt <= now) this.oauthStates.delete(k)
-    if (this.oauthStates.size >= OAUTH_PENDING_MAX) throw new ActionError('too_many_requests', 'Слишком много начатых входов, попробуйте позже')
+    if (this.oauthStates.size >= OAUTH_PENDING_MAX) {
+      // Не отказываем всем: 10 тыс. анонимных POST /oauth/*/start иначе
+      // выключают вход через провайдера для всех на 10 минут.
+      const oldest = this.oauthStates.keys().next().value
+      if (oldest) this.oauthStates.delete(oldest)
+    }
     const state = randomBytes(32).toString('base64url')
     const verifier = randomBytes(32).toString('base64url')
     this.oauthStates.set(state, {

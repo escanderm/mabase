@@ -509,7 +509,13 @@ export class Db {
     // и никто не должен менять их в обход лога.
     const ops: LogOp[] = []
     for (const [c, ov] of tx.overlay) {
-      for (const [id, doc] of ov) ops.push(doc ? { op: 'put', c, doc: deepFreeze(doc) } : { op: 'del', c, id })
+      for (const [id, doc] of ov) {
+        // Создали и удалили в одной транзакции - удалять нечего: без этой
+        // проверки в лог уходил no-op del, а подписчики получали событие
+        // '<коллекция>.created' с doc: null (тест 163).
+        if (!doc && !this.data.get(c)?.get(id)) continue
+        ops.push(doc ? { op: 'put', c, doc: deepFreeze(doc) } : { op: 'del', c, id })
+      }
     }
     deepFreeze(ops)
     if (ops.length > this.opts.bigTxOps) {
@@ -684,7 +690,7 @@ export class Db {
       }
     }
     this.ensureOpen(tx)
-    next = this.finalize(c, next)
+    next = this.finalize(c, next, prev)
     this.stage(tx, c, id, next)
     try {
       this.checkRefs(tx, c, next, prev)
@@ -773,9 +779,9 @@ export class Db {
 
   // Документ перед записью: схема, проверка на JSON и копия через JSON -
   // в памяти лежит ровно то, что прочитается из лога после рестарта.
-  private finalize(c: string, doc: Doc): Doc {
+  private finalize(c: string, doc: Doc, legacy?: Doc): Doc {
     const schema = this.defs.get(c)?.schema
-    if (schema) doc = validateDoc(c, schema, doc)
+    if (schema) doc = validateDoc(c, schema, doc, legacy)
     assertJson(doc)
     return JSON.parse(JSON.stringify(doc))
   }

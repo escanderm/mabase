@@ -58,10 +58,17 @@ export function checkIndexes(collection: string, schema: Schema | undefined, ind
 
 // Проверить документ схемой. Возвращает то, что отдал zod (с умолчаниями и без
 // лишних полей), плюс служебные поля.
-export function validateDoc(collection: string, schema: Schema, doc: Doc): Doc {
+// legacy - документ до обновления: поля, которых схема не знает, но которые в
+// нём уже были, не удаляются. Иначе первый же update старого документа молча
+// срезал бы всё, чего нет в новой схеме (design.md §8: «перестаёт
+// проверяться», а не «исчезает»). Новые поля вне схемы по-прежнему не
+// появляются - только те, что были.
+export function validateDoc(collection: string, schema: Schema, doc: Doc, legacy?: Doc): Doc {
   const body: Record<string, unknown> = { ...doc }
   for (const f of SYSTEM_FIELDS) delete body[f]
   const r = schema.safeParse(body)
   if (!r.success) throw new ValidationError(collection, r.error.issues.map((i) => ({ path: i.path, message: i.message })))
-  return { ...(r.data as object), _id: doc._id, _createdAt: doc._createdAt, _updatedAt: doc._updatedAt }
+  const out: Record<string, unknown> = { ...(r.data as object) }
+  if (legacy) for (const [k, v] of Object.entries(body)) if (!(k in out) && Object.hasOwn(legacy, k)) out[k] = v
+  return { ...out, _id: doc._id, _createdAt: doc._createdAt, _updatedAt: doc._updatedAt }
 }

@@ -93,6 +93,7 @@ export class Conn {
   private timers: Array<ReturnType<typeof setTimeout>> = []
   private sent: number[] = [] // время клиентских событий за последнюю секунду
   private queue: Promise<void> = Promise.resolve() // сообщения клиента - по порядку
+  private pending = 0 // сколько сообщений уже в очереди на обработку
 
   constructor(
     private rt: Realtime,
@@ -113,7 +114,18 @@ export class Conn {
   }
 
   receive(text: string): Promise<void> {
-    return (this.queue = this.queue.then(() => this.handle(text)))
+    // Клиент может закинуть десятки тысяч сообщений: они запомнятся
+    // замыканиями со строками до 64 КБ. Очередь ограничена, дальше - закрытие.
+    if (++this.pending > 200) {
+      this.pending--
+      this.close(4009, 'слишком много сообщений подряд')
+      return Promise.resolve()
+    }
+    return (this.queue = this.queue
+      .then(() => this.handle(text))
+      .finally(() => {
+        this.pending--
+      }))
   }
 
   private async handle(text: string): Promise<void> {

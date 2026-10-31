@@ -188,6 +188,41 @@ describe('after* и глубина', () => {
   }, 15_000)
 })
 
+describe('схема и события', () => {
+  test('162. схема на update не срезает поля вне схемы: старое остаётся, новое не появляется', async () => {
+    const db = await openDb({ dir: tmpDir('schema'), compactMinBytes: 0 })
+    db.collection('u') // документ «старого» вида - до схемы
+    const d = await db.c.u!.insert({ name: 'a', legacy: 1 })
+    db.collection('u', { schema: z.object({ name: z.string() }) })
+
+    await db.c.u!.update(d._id, { $set: { name: 'b' } })
+    expect(db.peek('u', d._id)).toMatchObject({ name: 'b', legacy: 1 }) // раньше legacy исчезало
+
+    // а вот новое поле вне схемы по-прежнему не появляется
+    await db.c.u!.update(d._id, { $set: { extra: 2 } })
+    expect(db.peek('u', d._id)!.extra).toBeUndefined()
+    await db.close()
+  })
+
+  test('163. созданный и удалённый в одной транзакции документ не даёт событий и не пишет в лог', async () => {
+    const db = await openDb({ dir: tmpDir('noop'), compactMinBytes: 0 })
+    const changes: string[] = []
+    db.onCommit((info) => {
+      for (const ch of info.changes) changes.push(`${ch.c}:${ch.doc ? 'put' : 'del'}`)
+    })
+    const before = db.lastTx
+    await db.transaction(async (tx) => {
+      const d = await tx.c.tmp!.insert({ a: 1 })
+      await tx.c.tmp!.remove(d._id)
+    })
+    // Раньше в лог уходил no-op del, а подписчики получали '<c>.created' с doc: null
+    expect(db.lastTx).toBe(before)
+    expect(changes).toEqual([])
+    expect(await db.c.tmp!.find()).toEqual([])
+    await db.close()
+  })
+})
+
 describe('$set через не-объект', () => {
   test('150. вложенный путь через скаляр и через массив - ошибка, поле не теряется', async () => {
     const db = await openDb({ dir: tmpDir('set'), compactMinBytes: 0 })
