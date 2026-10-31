@@ -27,6 +27,8 @@ import { expandDocs, parseExpand } from './expand'
 import { validateQuery } from './query'
 import { SUPERUSER_SESSIONS, SUPERUSERS, type Superuser, type Superusers } from './superusers'
 import type { Mailer } from './mail'
+import { FILES, type FileFields, type FileMeta, type FileStore, type Upload } from './files'
+import { parseRange } from './http'
 import { forbiddenSegment } from './paths'
 import { COLLECTIONS, type Registry } from './registry'
 import { SETTINGS, type Settings, type StoredSettings } from './settings'
@@ -41,6 +43,8 @@ export type AdminApiOptions = {
   mail: Mailer
   tail?: Tail
   startedAt?: number
+  files?: FileStore // файлы: админка грузит/скачивает их сама (правила - для клиентов)
+  fileDefs?: (c: string) => FileFields | undefined // объявленные поля-файлы коллекции
 }
 
 type Req = { req: Request; url: URL; parts: string[]; ip?: string; body: () => Promise<any> }
@@ -90,7 +94,7 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
     clientErrors(async () => {
       const { req, url, parts } = r
       const m = req.method
-      const [top, a, b, c3] = parts
+      const [top, a, b, c3, d4] = parts
 
       // ---------- без входа ----------
       if (top === 'setup' && !a) {
@@ -198,6 +202,83 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
         if (a && !b && m === 'DELETE') {
           await su.remove(a)
           by(me, 'superuser.delete', { id: a })
+          return new Response(null, { status: 204 })
+        }
+      }
+
+      // ---------- файлы ----------
+      // Админка видит файлы любой коллекции (она и так видит все записи).
+      if (top === 'files' && a) {
+        const store = o.files
+        if (!store) throw bad('файлы не настроены')
+        if ((m === 'GET' || m === 'HEAD') && !b) {
+          const meta = (await db.c[FILES]!.findOne({ _id: a })) as FileMeta | null
+          if (!meta) throw new ActionError('not_found', 'Файл не найден')
+          const range = parseRange(req.headers.get('range'), meta.size)
+          if (range === 'invalid') return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${meta.size}`, 'Accept-Ranges': 'bytes' } })
+          const bytes = await store.read(meta, range ?? undefined)
+          const headers: Record<string, string> = {
+            'Content-Type': meta.mime,
+            'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(meta.name)}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': String(bytes.byteLength),
+            ...(range && { 'Content-Range': `bytes ${range.start}-${range.end}/${meta.size}` }),
+          }
+          return new Response(m === 'HEAD' ? null : (bytes as unknown as BodyInit), { status: range ? 206 : 200, headers })
+        }
+
+        // POST files/<коллекция>/<запись>/<поле> - загрузить файл в поле.
+        // Части: a - коллекция, b - запись, c3 - поле (всё после 'files').
+        if (m === 'POST' && a && b && c3) {
+          const def = (o.fileDefs?.(a) ?? {})[c3]
+          if (!def) throw bad(`поле ${c3} не объявлено как файл (files)`)
+          const coll = collection(a)
+          const parent = await coll.findOne({ _id: b })
+          if (!parent) throw new ActionError('not_found', 'Запись не найдена')
+          const form = await req.formData().catch(() => {
+            throw bad('нужен multipart/form-data с файлом')
+          })
+          const ups: Upload[] = []
+          for (const [, v] of form.entries() as IterableIterator<[string, string | File]>) {
+            if (typeof v === 'string') continue
+            ups.push({ name: v.name, type: v.type, bytes: new Uint8Array(await v.arrayBuffer()) })
+          }
+          if (!ups.length) throw bad('в форме нет файла')
+          if (!def.many && ups.length > 1) throw bad(`в ${c3} один файл, а пришло ${ups.length}`)
+          const saved = await store.save(a, b, { [c3]: def }, { [c3]: ups })
+          try {
+            await db.transaction(async (tx) => {
+              for (const fm of saved.metas) await tx.c[FILES]!.insert(fm as unknown as Record<string, unknown>)
+              const cur = await tx.c[a]!.findOne({ _id: b })
+              if (!cur) throw new ActionError('not_found', 'Запись не найдена')
+              const value = saved.values[c3]!
+              const before = cur[c3]
+              const list = Array.isArray(before) ? before : before ? [before] : []
+              const next = def.many ? [...list, ...(Array.isArray(value) ? value : [value])] : value
+              await tx.c[a]!.update(b, { $set: { [c3]: next } })
+            }, { user: null, origin: 'api' })
+          } catch (err) {
+            await store.removeMany(saved.metas)
+            throw err
+          }
+          by(me, 'file.upload', { c: a, id: b, field: c3, files: saved.metas.length })
+          return json({ values: saved.values, metas: saved.metas })
+        }
+
+        // DELETE files/<id> - убрать файл из хранилища и из записи
+        if (m === 'DELETE' && !b) {
+          const meta = (await db.c[FILES]!.findOne({ _id: a })) as FileMeta | null
+          if (!meta) throw new ActionError('not_found', 'Файл не найден')
+          await db.transaction(async (tx) => {
+            await tx.c[FILES]!.remove(a)
+            const parent = await tx.c[meta.collection]!.findOne({ _id: meta.recordId })
+            if (!parent) return
+            const cur = parent[meta.field]
+            if (Array.isArray(cur)) await tx.c[meta.collection]!.update(meta.recordId, { $set: { [meta.field]: cur.filter((x) => x !== a) } })
+            else await tx.c[meta.collection]!.update(meta.recordId, { $unset: { [meta.field]: '' } })
+          }, { user: null, origin: 'api' })
+          await store.removeOne(meta)
+          by(me, 'file.delete', { c: meta.collection, id: meta.recordId, field: meta.field, file: a })
           return new Response(null, { status: 204 })
         }
       }
@@ -316,6 +397,7 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
       rules: { list: src(rules.list), view: src(rules.view), create: src(rules.create), update: src(rules.update), delete: src(rules.delete) },
       dependsOn: rules.dependsOn ?? [],
       owner: def.owner,
+      files: def.files ?? {},
       fields: { readonly: [...def.readonly], immutable: [...def.immutable], private: [...def.private], hidden: [...def.hidden] },
     }
   }

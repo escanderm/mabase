@@ -14,7 +14,7 @@ import { clientErrors, type Access } from './access'
 import { toClientError, type Actions } from './actions'
 import { USERS, type Auth } from './auth'
 import { parseExpand } from './expand'
-import type { Upload } from './files'
+import type { ByteRange, Upload } from './files'
 import { importNdjson } from './import'
 import { sdkBundle } from './sdk'
 import type { User } from './db'
@@ -223,16 +223,37 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
       return new Response(await sdkBundle(), { headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=300' } })
     }
 
-    if (parts[0] === 'files' && parts.length === 2 && method === 'GET') {
-      const { meta, bytes } = await access.forUser(await user()).file(parts[1])
+    if (parts[0] === 'files' && parts.length === 2 && (method === 'GET' || method === 'HEAD')) {
+      const session = access.forUser(await user())
+      const meta = await session.fileInfo(parts[1])
       const name = encodeURIComponent(meta.name)
       const disposition = url.searchParams.get('download') ? 'attachment' : 'inline'
+      const base = {
+        'Content-Type': meta.mime,
+        'Content-Disposition': `${disposition}; filename*=UTF-8''${name}`,
+        'Cache-Control': 'private, max-age=300',
+        'Accept-Ranges': 'bytes',
+      }
+      const range = parseRange(req.headers.get('range'), meta.size)
+      if (range === 'invalid') {
+        return new Response(null, { status: 416, headers: { ...base, 'Content-Range': `bytes */${meta.size}`, 'Content-Length': '0' } })
+      }
+      if (range) {
+        const bytes = await session.readFile(meta, range)
+        return new Response(method === 'HEAD' ? null : (bytes as unknown as BodyInit), {
+          status: 206,
+          headers: {
+            ...base,
+            'Content-Range': `bytes ${range.start}-${range.end}/${meta.size}`,
+            'Content-Length': String(bytes.byteLength),
+          },
+        })
+      }
+      const bytes = method === 'HEAD' ? null : await session.readFile(meta)
       return new Response(bytes as unknown as BodyInit, {
         headers: {
-          'Content-Type': meta.mime,
+          ...base,
           'Content-Length': String(meta.size),
-          'Content-Disposition': `${disposition}; filename*=UTF-8''${name}`,
-          'Cache-Control': 'private, max-age=300',
         },
       })
     }
@@ -423,4 +444,29 @@ function safeEqualStr(a: string, b: string): boolean {
   let d = 0
   for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i)
   return d === 0
+}
+
+// Range: bytes=start-end | start- | -suffix. Несколько диапазонов не
+// поддерживаем - отдаём файл целиком (так разрешает RFC 9110).
+// 'invalid' - 416 (запрошен кусок за концом файла).
+export function parseRange(header: string | null, size: number): ByteRange | 'invalid' | null {
+  if (!header) return null
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (!m) return null
+  const [, a, b] = m
+  if (a === '' && b === '') return null
+  let start: number
+  let end: number
+  if (a === '') {
+    // суффикс: последние N байт
+    const n = Number(b)
+    if (!n) return 'invalid'
+    start = Math.max(0, size - n)
+    end = size - 1
+  } else {
+    start = Number(a)
+    end = b === '' ? size - 1 : Math.min(Number(b), size - 1)
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return 'invalid'
+  return { start, end }
 }

@@ -92,6 +92,29 @@ try {
   }
 } catch {}
 
+// Файл из админки: сервер отдаёт его по /api/_/files/:id только суперпользователю,
+// поэтому качаем с токеном и открываем blob - ссылку с токеном в URL не кладём.
+async function openAdminFile(id: string): Promise<void> {
+  const res = await fetch(`/api/_/files/${encodeURIComponent(id)}`, { headers: { ...(token && { Authorization: `Bearer ${token}` }) } })
+  if (!res.ok) throw new ApiError(res.status, 'error', `Файл ${id}: ошибка ${res.status}`)
+  const url = URL.createObjectURL(await res.blob())
+  window.open(url, '_blank')
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+async function uploadAdminFile(c: string, id: string, field: string, file: File): Promise<{ values: Record<string, string | string[]> }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`/api/_/files/${encodeURIComponent(c)}/${encodeURIComponent(id)}/${encodeURIComponent(field)}`, {
+    method: 'POST',
+    headers: { ...(token && { Authorization: `Bearer ${token}` }) },
+    body: form,
+  })
+  const data: any = await res.json().catch(() => null)
+  if (!res.ok) throw new ApiError(res.status, data?.code ?? 'error', data?.message ?? `Ошибка ${res.status}`, data?.details)
+  return data
+}
+
 async function api<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api/_/${path}`, {
     method,
@@ -956,9 +979,67 @@ function editDialog(c: string, doc: Doc, reload: () => void): void {
   const ta = h('textarea', { class: 'code', spellcheck: 'false' }, JSON.stringify(doc, null, 2))
   ta.style.minHeight = '360px'
   const err = h('div', { class: 'error-text' })
+  const filesBox = h('div', { class: 'files-box' })
+  const sync = () => (ta.value = JSON.stringify(doc, null, 2))
+  const renderFiles = (defs: Record<string, { many?: boolean }>) => {
+    filesBox.replaceChildren()
+    const entries = Object.entries(defs ?? {})
+    if (!entries.length) return
+    filesBox.append(h('div', { class: 'faint' }, 'Файлы (загружаются и удаляются сразу, без «Сохранить»)'))
+    for (const [field, def] of entries) {
+      const ids: string[] = Array.isArray(doc[field]) ? [...(doc[field] as string[])] : doc[field] ? [doc[field] as string] : []
+      const row = h('div', { class: 'file-row' }, h('b', {}, field), def.many ? h('span', { class: 'faint' }, ' много') : null)
+      for (const fid of ids) {
+        row.append(h('button', { class: 'btn small', type: 'button', onclick: () => openAdminFile(fid).catch((e) => (err.textContent = errorText(e))) }, 'скачать'))
+        row.append(
+          h(
+            'button',
+            {
+              class: 'btn small danger',
+              type: 'button',
+              onclick: async () => {
+                try {
+                  await api('DELETE', `files/${encodeURIComponent(fid)}`)
+                  doc[field] = def.many ? ids.filter((x) => x !== fid) : undefined
+                  sync()
+                  renderFiles(defs)
+                  toast('Файл удалён')
+                } catch (e) {
+                  err.textContent = errorText(e)
+                }
+              },
+            },
+            'удалить',
+          ),
+        )
+      }
+      const input = h('input', {
+        type: 'file',
+        onchange: async () => {
+          const f = input.files?.[0]
+          if (!f) return
+          try {
+            const data = await uploadAdminFile(c, doc._id, field, f)
+            const v = data.values[field]
+            doc[field] = def.many ? [...ids, ...(Array.isArray(v) ? v : [v])] : v
+            sync()
+            renderFiles(defs)
+            toast('Файл загружен')
+          } catch (e) {
+            err.textContent = errorText(e)
+          }
+        },
+      })
+      row.append(input)
+      filesBox.append(row)
+    }
+  }
+  api('GET', `c/${encodeURIComponent(c)}/meta`)
+    .then((m) => renderFiles(m.files ?? {}))
+    .catch(() => {})
   const d = dialog(
     `${c} / ${doc._id}`,
-    [ta, err],
+    [filesBox, ta, err],
     [
       h('button', { class: 'btn', onclick: () => d.close() }, 'Отмена'),
       h(

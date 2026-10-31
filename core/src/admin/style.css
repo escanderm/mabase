@@ -321,3 +321,20 @@ select.input { padding-right: 6px; }
   .grid2 { grid-template-columns: 1fr; }
   .top .host { display: none; }
 }
+
+/* Файлы в диалоге записи: текущие + загрузка/удаление */
+.files-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.file-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.file-row input[type='file'] {
+  max-width: 240px;
+}

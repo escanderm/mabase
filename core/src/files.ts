@@ -5,7 +5,7 @@
 // транзакции удаляет файл, а падение между записью и коммитом оставляет
 // сироту - это безопасно, на неё никто не ссылается.
 import { createHash, createHmac } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, rmSync, unlinkSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Change, Db } from './db'
 import { ActionError, NotFoundError } from './errors'
@@ -45,9 +45,11 @@ const idsOf = (v: unknown): string[] => (typeof v === 'string' ? [v] : Array.isA
 
 // Куда кладутся байты. Метаданные всегда в базе, поэтому хранилище можно
 // менять: старые файлы при этом не переезжают (см. README).
+export type ByteRange = { start: number; end: number } // включительно, как в HTTP
+
 export interface FileStorage {
   put(meta: FileMeta, bytes: Uint8Array): Promise<void>
-  get(meta: FileMeta): Promise<Uint8Array>
+  get(meta: FileMeta, range?: ByteRange): Promise<Uint8Array>
   delete(meta: FileMeta): Promise<void>
   // Есть ли файл в хранилище. Нужен переносу: не копировать то, что уже там.
   head(meta: FileMeta): Promise<boolean>
@@ -78,8 +80,24 @@ export class LocalStorage implements FileStorage {
     }
   }
 
-  async get(meta: FileMeta): Promise<Uint8Array> {
-    return readFileSync(this.pathFor(meta))
+  // Срез читается только нужными байтами: докачка большого файла не поднимает
+  // его целиком в память.
+  async get(meta: FileMeta, range?: ByteRange): Promise<Uint8Array> {
+    if (!range) return readFileSync(this.pathFor(meta))
+    const len = range.end - range.start + 1
+    const buf = Buffer.allocUnsafe(len)
+    const fd = openSync(this.pathFor(meta), 'r')
+    try {
+      let got = 0
+      while (got < len) {
+        const n = readSync(fd, buf, got, len - got, range.start + got)
+        if (!n) break
+        got += n
+      }
+      return buf.subarray(0, got)
+    } finally {
+      closeSync(fd)
+    }
   }
 
   async delete(meta: FileMeta): Promise<void> {
@@ -160,10 +178,10 @@ export class S3Storage implements FileStorage {
     return { ...headers, authorization: `AWS4-HMAC-SHA256 Credential=${this.opts.accessKeyId}/${scope}, SignedHeaders=${signed}, Signature=${signature}` }
   }
 
-  private async request(method: string, key: string, body?: Uint8Array): Promise<Response> {
+  private async request(method: string, key: string, body?: Uint8Array, extra?: Record<string, string>): Promise<Response> {
     const { url, host, path } = this.location(key)
     const payloadHash = sha256hex(body ?? new Uint8Array())
-    const headers = this.sign(method, host, path, payloadHash)
+    const headers = { ...this.sign(method, host, path, payloadHash), ...extra }
     const res = await fetch(url, { method, headers, body: body as BodyInit | undefined })
     if (!res.ok && res.status !== 404) {
       const text = await res.text().catch(() => '')
@@ -176,10 +194,14 @@ export class S3Storage implements FileStorage {
     await this.request('PUT', this.key(meta), bytes)
   }
 
-  async get(meta: FileMeta): Promise<Uint8Array> {
-    const res = await this.request('GET', this.key(meta))
+  async get(meta: FileMeta, range?: ByteRange): Promise<Uint8Array> {
+    // Range в S3 - обычный заголовок со подписью; сервер отвечает 206 и срезом
+    const res = await this.request('GET', this.key(meta), undefined, range ? { range: `bytes=${range.start}-${range.end}` } : undefined)
     if (res.status === 404) throw new NotFoundError('файл', meta._id)
-    return new Uint8Array(await res.arrayBuffer())
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    // сервер вправе проигнорировать Range и отдать всё - вырезаем сами
+    if (range && res.status === 200) return bytes.subarray(range.start, range.end + 1)
+    return bytes
   }
 
   async delete(meta: FileMeta): Promise<void> {
@@ -239,8 +261,8 @@ export class FileStore {
     return { values, metas }
   }
 
-  async read(meta: FileMeta): Promise<Uint8Array> {
-    return this.storage.get(meta)
+  async read(meta: FileMeta, range?: ByteRange): Promise<Uint8Array> {
+    return this.storage.get(meta, range)
   }
 
   async removeOne(meta: FileMeta): Promise<void> {

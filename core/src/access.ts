@@ -4,7 +4,7 @@
 import { project, type CollectionApi, type Db, type Doc, type FindOptions, type Query, type Update, type User } from './db'
 import { ActionError, NotFoundError, QueryError, ValidationError } from './errors'
 import { expandDocs } from './expand'
-import { FILES, type FileFields, type FileMeta, type FileStore, type Upload } from './files'
+import { FILES, type ByteRange, type FileFields, type FileMeta, type FileStore, type Upload } from './files'
 import { forbiddenSegment } from './paths'
 import { ulid } from './ulid'
 import { applyUpdate, SYSTEM_FIELDS, validateQuery, validateUpdate } from './query'
@@ -331,9 +331,9 @@ export class ClientSession {
     walk(filter)
   }
 
-  // Файл по id: виден, только если видна запись, к которой он приложен
-  // (правило view родительской коллекции). Нет доступа - 404, как и записи.
-  async file(id: unknown): Promise<{ meta: FileMeta; bytes: Uint8Array }> {
+  // Метаданные файла с проверкой доступа: виден, только если видна запись,
+  // к которой он приложен (правило view родительской коллекции).
+  async fileInfo(id: unknown): Promise<FileMeta> {
     if (typeof id !== 'string' || !id) throw bad('id файла - строка')
     const store = this.access.opts.files
     const meta = (await this.access.db.c[FILES]!.findOne({ _id: id })) as FileMeta | null
@@ -345,8 +345,18 @@ export class ClientSession {
     if (rule === false) throw new ActionError('not_found', 'Файл не найден')
     const parent = await this.access.db.c[meta.collection]!.findOne(and(rule, { _id: meta.recordId }))
     if (!parent) throw new ActionError('not_found', 'Файл не найден')
+    return meta
+  }
+
+  // Байты файла (можно срезом: см. Access.fileInfo для доступа).
+  async readFile(meta: FileMeta, range?: ByteRange): Promise<Uint8Array> {
+    return this.access.opts.files!.read(meta, range)
+  }
+
+  async file(id: unknown): Promise<{ meta: FileMeta; bytes: Uint8Array }> {
+    const meta = await this.fileInfo(id)
     try {
-      return { meta, bytes: await store.read(meta) }
+      return { meta, bytes: await this.readFile(meta) }
     } catch {
       throw new ActionError('not_found', 'Файл не найден')
     }

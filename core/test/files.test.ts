@@ -215,3 +215,51 @@ function memory() {
 }
 
 void sleep
+
+describe('Range', () => {
+  const chunk = new Uint8Array(Array.from({ length: 100 }, (_, i) => i))
+  test('203. Range: 206, Content-Range, суффикс, 416 и HEAD', async () => {
+    const { s } = await (async () => {
+      const dir = tmpDir('range2')
+      const srv = await startServer({ dataDir: dir, port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false }, collections: { docs: { schema: z.object({ title: z.string(), bin: z.string().optional() }).passthrough(), files: { bin: { accept: ['application/octet-stream'] } }, rules: { view: () => true, list: () => true, create: () => true } } } })
+      const form = new FormData()
+      form.append('title', JSON.stringify('r'))
+      form.append('bin', new File([chunk as unknown as BlobPart], 'b.bin', { type: 'application/octet-stream' }))
+      const doc = await (await fetch(`${srv.url}/api/c/docs`, { method: 'POST', body: form })).json()
+      return { s: { ...srv, fileId: doc.bin as string } }
+    })()
+    try {
+      const id = (s as any).fileId as string
+      const full = await fetch(`${s.url}/api/files/${id}`)
+      expect(full.status).toBe(200)
+      expect(full.headers.get('accept-ranges')).toBe('bytes')
+      expect(new Uint8Array(await full.arrayBuffer())).toEqual(chunk)
+
+      const part = await fetch(`${s.url}/api/files/${id}`, { headers: { Range: 'bytes=10-19' } })
+      expect(part.status).toBe(206)
+      expect(part.headers.get('content-range')).toBe('bytes 10-19/100')
+      expect(part.headers.get('content-length')).toBe('10')
+      expect(new Uint8Array(await part.arrayBuffer())).toEqual(chunk.slice(10, 20))
+
+      const open = await fetch(`${s.url}/api/files/${id}`, { headers: { Range: 'bytes=90-' } })
+      expect(open.status).toBe(206)
+      expect(open.headers.get('content-range')).toBe('bytes 90-99/100')
+      expect(new Uint8Array(await open.arrayBuffer())).toEqual(chunk.slice(90))
+
+      const suffix = await fetch(`${s.url}/api/files/${id}`, { headers: { Range: 'bytes=-5' } })
+      expect(suffix.status).toBe(206)
+      expect(new Uint8Array(await suffix.arrayBuffer())).toEqual(chunk.slice(95))
+
+      const bad = await fetch(`${s.url}/api/files/${id}`, { headers: { Range: 'bytes=500-600' } })
+      expect(bad.status).toBe(416)
+      expect(bad.headers.get('content-range')).toBe('bytes */100')
+
+      const head = await fetch(`${s.url}/api/files/${id}`, { method: 'HEAD' })
+      expect(head.status).toBe(200)
+      expect(head.headers.get('content-length')).toBe('100')
+      expect(await head.arrayBuffer()).toEqual(new ArrayBuffer(0))
+    } finally {
+      await s.stop()
+    }
+  }, 30_000)
+})

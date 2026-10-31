@@ -18,7 +18,7 @@ import { Scheduler, ensureSchedules, type SchedulerOptions } from './scheduler'
 import { reloadHooks as reloadHookFiles, watchHooks, type HooksInfo } from './hooks'
 import { scheduledTasks } from './api'
 import { writeEditorTypes } from './editor'
-import { attachFileCleanup, FILES, FileStore, LocalStorage, S3Storage, type S3Options } from './files'
+import { attachFileCleanup, FILES, type FileFields, FileStore, LocalStorage, S3Storage, type S3Options } from './files'
 import { maskSecrets, Tail } from './tail'
 import { createAdminApi } from './admin-api'
 import { Superusers, type SuperuserOptions } from './superusers'
@@ -85,6 +85,7 @@ export type App = {
   settings: Settings
   registry: Registry
   files: FileStore
+  fileDefs: (c: string) => FileFields | undefined
   close: () => Promise<void>
 }
 
@@ -195,6 +196,7 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
       settings,
       registry,
       files,
+      fileDefs,
       close: async () => {
         await auth.settled()
         await bus.settled()
@@ -236,7 +238,10 @@ export async function startServer(cfg: ServerConfig): Promise<RunningServer> {
   try {
     if (app.mail.mode === 'dev') warn('Почта не настроена: письма печатаются в консоль')
     const adminToken = randomBytes(32).toString('base64url')
-    const adminApi = cfg.admin?.enabled === false ? undefined : createAdminApi({ access: app.access, superusers: app.superusers, settings: app.settings, registry: app.registry, mail: app.mail, tail: app.tail })
+    const adminApi =
+      cfg.admin?.enabled === false
+        ? undefined
+        : createAdminApi({ access: app.access, superusers: app.superusers, settings: app.settings, registry: app.registry, mail: app.mail, tail: app.tail, files: app.files, fileDefs: app.fileDefs })
     const handle = createHandler({ ...cfg.http, access: app.access, auth: app.auth, actions: app.actions, adminToken, tail: app.tail, adminApi, superusers: app.superusers })
     let rt: Realtime | null = null
     if (cfg.realtime) {
