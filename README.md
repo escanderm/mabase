@@ -125,6 +125,56 @@ my-app/
     admin.json         # адрес и токен для команд CLI, пока сервер работает
 ```
 
+## Настройки: что где
+
+Три источника, и у каждого своё место:
+
+| Что | Где задаётся |
+|---|---|
+| Коллекции, схемы, правила, хуки, действия, события, cron | `mabase.config.ts`, `mb_hooks/` - это код |
+| Порт, хост, папка данных, статика, публичный адрес, CORS | переменные окружения, `.env` или флаги |
+| Секреты: `MABASE_SECRET`, S3, SMTP, Google/GitHub | `.env` (не в git) или админка (шифруются `secret.key`) |
+| Способы входа и почта «на ходу» | админка `/_/` |
+
+**Приоритет:** флаги CLI > env > `mabase.config.ts` > настройки админки >
+умолчания. Одно значение - один победитель, и `mabase config` его показывает.
+
+Локально достаточно одного файла: `.env` рядом с бинарником (Bun читает его
+сам), шаблон - [`.env.example`](.env.example). Коллекции в env не задаются:
+это код, он живёт в конфиге и проходит ревью.
+
+```
+$ ./mabase config
+MaBase 0.2.8: настройки (слева - значение, справа - откуда оно)
+  папка данных         /opt/my-app/mb_data            (по умолчанию)
+  порт                 9000                           (MABASE_PORT)
+  хост                 127.0.0.1                      (MABASE_HOST)
+  публичный адрес      https://my.app                 (MABASE_SERVER_URL)
+  CORS                 https://my.app                 (config)
+  секрет подписи       есть (файл)                    (mb_data/secret.key)
+  файлы                S3 my-files @ storage.yandexcloud.net/myapp, ключ ***  (MABASE_S3_*)
+  почта                SMTP smtp.example.test:587, пароль ***                 (MABASE_SMTP_*)
+  вход                 password, authphone; OAuth: google                     (config)
+  коллекции            notes, messages (2)            (config)
+  хуки                 a.ts, digest.ts (2)            (mb_hooks/)
+```
+
+| Переменная | Что |
+|---|---|
+| `MABASE_DIR`, `MABASE_PORT`, `MABASE_HOST` | папка данных, порт, адрес |
+| `MABASE_PUBLIC`, `MABASE_SERVER_URL`, `MABASE_CORS` | статика, публичный адрес, источники CORS |
+| `MABASE_SECRET` | ключ подписи токенов вместо `mb_data/secret.key` (не короче 32) |
+| `MABASE_S3_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_ENDPOINT`, `_PREFIX`, `_PATH_STYLE`, `_SESSION_TOKEN` | файлы в S3 |
+| `MABASE_SMTP_HOST`, `_PORT`, `_USER`, `_PASS`, `_SECURE`, `MABASE_MAIL_FROM` | почта |
+| `MABASE_APP_URL`, `MABASE_GOOGLE_ID/SECRET`, `MABASE_GITHUB_ID/SECRET` | вход |
+| `MABASE_UPDATE_URL` | свой сервер обновлений вместо GitHub |
+
+- Неизвестная `MABASE_*` - предупреждение при старте (опечатка не молчит).
+- Кривое значение - ошибка с именем переменной, а не загадка позже.
+- S3 можно задать частично в env, а остальное - в конфиге.
+- Секреты в env видны в `docker inspect` и `/proc/<pid>/environ`: на сервере
+  кладите `.env` с правами 600 или используйте секрет-менеджер.
+
 ## Админка
 
 `http://<сервер>:8090/_/` - вход по email и паролю администратора.

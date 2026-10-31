@@ -16,6 +16,8 @@ import { join, resolve } from 'node:path'
 import * as api from './api'
 import { openDb } from './db'
 import { LockedError } from './errors'
+import { configView } from './config-view'
+import { readEnv } from './env'
 import { importNdjson } from './import'
 import { applyMigrations, loadMigrations } from './migrations'
 import { formatTail } from './tail'
@@ -39,7 +41,16 @@ function registerModule(): void {
   })
 }
 
-export type Flags = { dir: string; port: number; host?: string; public?: string; root: string; dev: boolean; check: boolean }
+export type Flags = {
+  dir: string
+  port: number
+  host?: string
+  public?: string
+  root: string
+  dev: boolean
+  check: boolean
+  given: { dir?: boolean; port?: boolean; host?: boolean; public?: boolean } // что задано флагом (приоритет над env)
+}
 
 export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags } {
   const args: string[] = []
@@ -64,7 +75,21 @@ export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags:
   return {
     cmd: args.shift() ?? 'help',
     args,
-    flags: { root, dir: resolve(root, raw.dir ?? 'mb_data'), port, host: raw.host, public: raw.public && resolve(root, raw.public), dev, check },
+    flags: {
+      root,
+      dir: resolve(root, raw.dir ?? 'mb_data'),
+      port,
+      host: raw.host,
+      public: raw.public && resolve(root, raw.public),
+      dev,
+      check,
+      given: {
+        ...(raw.dir !== undefined && { dir: true }),
+        ...(raw.port !== undefined && { port: true }),
+        ...(raw.host !== undefined && { host: true }),
+        ...(raw.public !== undefined && { public: true }),
+      },
+    },
   }
 }
 
@@ -72,7 +97,10 @@ class UsageError extends Error {}
 
 // Конфиг и хуки проекта. Ошибка в любом файле останавливает запуск: сервер
 // без части логики опаснее, чем упавший (design.md §21).
-export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): Promise<{ config: ServerConfig; seed?: api.SeedDefinition; hooks: string[] }> {
+export async function loadProject(
+  flags: Flags,
+  opts: { seed?: boolean; env?: Record<string, string | undefined> } = {},
+): Promise<{ config: ServerConfig; seed?: api.SeedDefinition; hooks: string[]; sources: Record<string, string>; warnings: string[] }> {
   registerModule()
   api.resetApi()
   const load = async (file: string) => {
@@ -91,14 +119,54 @@ export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): 
   const collections: Record<string, CollectionConfig> = {}
   for (const { name, ...def } of appCfg.collections ?? []) collections[name] = def
   const defaultPublic = join(flags.root, 'mb_public')
+
+  // Приоритет: флаги CLI > env > mabase.config.ts > настройки админки > умолчания.
+  const env = readEnv(opts.env ?? process.env)
+  const given = flags.given ?? {} // внешние вызовы могут не заполнять given
+  const fromFlag = (k: 'dir' | 'port' | 'host' | 'public') => given[k] === true
+  const dataDir = fromFlag('dir') ? flags.dir : (env.overrides.dir ?? flags.dir)
+  const port = fromFlag('port') ? flags.port : (env.overrides.port ?? flags.port)
+  const hostname = fromFlag('host') ? flags.host : (env.overrides.host ?? flags.host)
+  const publicDir = fromFlag('public')
+    ? flags.public
+    : (env.overrides.publicDir ?? appCfg.http?.publicDir ?? (existsSync(defaultPublic) ? defaultPublic : undefined))
+
+  const s3 = appCfg.storage?.s3 || env.overrides.storage?.s3 ? { ...appCfg.storage?.s3, ...env.overrides.storage?.s3 } : undefined
+  const smtp = appCfg.mail?.smtp || env.overrides.mail?.smtp ? { ...appCfg.mail?.smtp, ...env.overrides.mail?.smtp } : undefined
+  const oauth = mergeOauth(appCfg.auth?.oauth, env.overrides.auth?.oauth)
+
+  const sources: Record<string, string> = {}
+  sources.dir = fromFlag('dir') ? 'флаг --dir' : env.overrides.dir ? 'MABASE_DIR' : 'по умолчанию'
+  sources.port = fromFlag('port') ? 'флаг --port' : env.overrides.port !== undefined ? 'MABASE_PORT' : 'по умолчанию'
+  sources.host = fromFlag('host') ? 'флаг --host' : env.overrides.host ? 'MABASE_HOST' : 'по умолчанию'
+  if (publicDir) sources.public = fromFlag('public') ? 'флаг --public' : env.overrides.publicDir ? 'MABASE_PUBLIC' : 'config'
+  const serverUrl = env.overrides.serverUrl ?? appCfg.http?.serverUrl
+  if (serverUrl) sources.serverUrl = env.overrides.serverUrl ? 'MABASE_SERVER_URL' : 'config'
+  const cors = env.overrides.cors ?? appCfg.http?.cors
+  if (cors) sources.cors = env.overrides.cors ? 'MABASE_CORS' : 'config'
+  if (env.overrides.secret) sources.secret = 'MABASE_SECRET'
+  if (s3) sources.storage = env.overrides.storage?.s3 ? 'MABASE_S3_*' : 'config'
+  if (smtp || env.overrides.mail?.from) sources.mail = env.overrides.mail ? 'MABASE_SMTP_*/MABASE_MAIL_FROM' : 'config'
+  if (oauth) sources.auth = env.overrides.auth ? 'MABASE_APP_URL/MABASE_GOOGLE_*/MABASE_GITHUB_*' : 'config'
+  if (env.overrides.auth?.appUrl && !oauth) sources.auth = 'MABASE_APP_URL'
+  const appUrl = env.overrides.auth?.appUrl ?? appCfg.auth?.appUrl
+  if ((smtp || env.overrides.mail?.from) && !appUrl) {
+    env.warnings.push('почта настроена, а адрес приложения не задан: нужен MABASE_APP_URL (или auth.appUrl) - на него ведут ссылки из писем')
+  }
+
   const config: ServerConfig = {
-    dataDir: flags.dir,
-    port: flags.port,
-    hostname: flags.host,
+    dataDir,
+    port,
+    hostname,
     collections,
     actions: appCfg.actions,
-    auth: appCfg.auth,
-    mail: appCfg.mail,
+    auth: {
+      ...appCfg.auth,
+      ...(env.overrides.secret !== undefined && { secret: env.overrides.secret }),
+      ...(env.overrides.auth?.appUrl !== undefined && { appUrl: env.overrides.auth.appUrl }),
+      ...(oauth && { oauth }),
+    },
+    mail: { ...appCfg.mail, ...(env.overrides.mail?.from !== undefined && { from: env.overrides.mail.from }), ...(smtp && { smtp }) },
     limits: appCfg.limits,
     db: appCfg.db,
     dev: flags.dev,
@@ -106,10 +174,10 @@ export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): 
     events: appCfg.events,
     scheduler: appCfg.scheduler,
     admin: appCfg.admin,
-    storage: appCfg.storage,
+    storage: s3 ? { s3 } : undefined,
     handlers: api.eventHandlers,
     hooksDir,
-    http: { ...appCfg.http, publicDir: flags.public ?? appCfg.http?.publicDir ?? (existsSync(defaultPublic) ? defaultPublic : undefined) },
+    http: { ...appCfg.http, publicDir, ...(serverUrl !== undefined && { serverUrl }), ...(cors !== undefined && { cors }) },
   }
   let seed: api.SeedDefinition | undefined
   const seedFile = join(flags.root, 'seed.ts')
@@ -118,7 +186,20 @@ export async function loadProject(flags: Flags, opts: { seed?: boolean } = {}): 
     seed = (await load(seedFile)).default
     if (!seed || typeof seed.seed !== 'function') throw new Error(`${seedFile}: export default defineSeed(...)`)
   }
-  return { config, seed, hooks }
+  return { config, seed, hooks, sources, warnings: env.warnings }
+}
+
+function mergeOauth(
+  fromConfig: Partial<Record<'google' | 'github', { clientId: string; clientSecret: string }>> | undefined,
+  fromEnv: Partial<Record<'google' | 'github', Partial<{ clientId: string; clientSecret: string }>>> | undefined,
+): Partial<Record<'google' | 'github', { clientId: string; clientSecret: string }>> | undefined {
+  if (!fromConfig && !fromEnv) return undefined
+  const out: any = { ...fromConfig }
+  for (const p of ['google', 'github'] as const) {
+    const e = fromEnv?.[p]
+    if (e?.clientId && e?.clientSecret) out[p] = { clientId: e.clientId, clientSecret: e.clientSecret }
+  }
+  return out
 }
 
 // База открыта запущенным сервером - команда идёт к нему через admin.
@@ -135,7 +216,8 @@ export async function run(argv: string[], out: (line: string) => void = console.
   const { cmd, args, flags } = parseArgs(argv)
   switch (cmd) {
     case 'serve': {
-      const { config, hooks } = await loadProject(flags)
+      const { config, hooks, warnings } = await loadProject(flags)
+      for (const w of warnings) out(`[mabase] ${w}`)
       const s = await startServer(config)
       api.bindMailer(s.mail)
       const events = [...api.eventHandlers().keys()]
@@ -173,7 +255,8 @@ export async function run(argv: string[], out: (line: string) => void = console.
       return
     }
     case 'seed': {
-      const { config, seed } = await loadProject(flags, { seed: true })
+      const { config, seed, warnings } = await loadProject(flags, { seed: true })
+      for (const w of warnings) out(`[mabase] ${w}`)
       const app = await openApp(config).catch(lockedHint)
       api.bindMailer(app.mail)
       try {
@@ -189,7 +272,8 @@ export async function run(argv: string[], out: (line: string) => void = console.
     }
     case 'migrate': {
       // Миграции - при остановленном сервере: они пишут в базу напрямую.
-      const { config } = await loadProject(flags)
+      const { config, warnings } = await loadProject(flags)
+      for (const w of warnings) out(`[mabase] ${w}`)
       const app = await openApp(config).catch(lockedHint)
       try {
         const list = await loadMigrations(join(flags.root, 'mb_migrations'))
@@ -260,6 +344,13 @@ export async function run(argv: string[], out: (line: string) => void = console.
       }
       return
     }
+    case 'config': {
+      const { config, sources, hooks, warnings } = await loadProject(flags)
+      for (const w of warnings) out(`[mabase] ${w}`)
+      out(`MaBase ${VERSION}: настройки (слева - значение, справа - откуда оно)`)
+      for (const l of configView(config, { sources, hooks })) out(`  ${l.key.padEnd(20)} ${l.value}${l.source ? `   (${l.source})` : ''}`)
+      return
+    }
     case 'version':
       out(VERSION)
       return
@@ -312,6 +403,7 @@ const HELP = `MaBase ${VERSION}
                 --dev - предупреждать, если правило читает коллекцию не из dependsOn
   mabase seed   - выполнить seed.ts (сервер должен быть остановлен)
   mabase migrate - применить миграции из mb_migrations/ (сервер остановлен)
+  mabase config - показать настройки и откуда взято каждое значение
   mabase backup <папка>
   mabase import <коллекция> <файл.ndjson>
   mabase tail   - живой журнал работающего сервера: коммиты, действия, события, ошибки

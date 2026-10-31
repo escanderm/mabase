@@ -319,7 +319,9 @@ export class Auth {
       if (!o.appUrl) throw new TypeError(`Нужен адрес приложения (auth.appUrl): туда вернётся пользователь после входа через ${title}`)
     }
     // В режиме разработки ссылка без адреса - путь; иначе ссылка из письма никуда не ведёт.
-    if (mailMode !== 'dev' && !o.appUrl) throw new TypeError('Нужен адрес приложения (auth.appUrl): на него ведут ссылки из писем')
+    if (mailMode !== 'dev' && !o.appUrl) {
+      throw new TypeError('Нужен адрес приложения: auth.appUrl в mabase.config.ts или MABASE_APP_URL - на него ведут ссылки из писем')
+    }
     const minPassword = o.minPasswordLength ?? 8
     if (!Number.isInteger(minPassword) || minPassword < 6 || minPassword > 128) throw new TypeError('auth.minPasswordLength: от 6 до 128')
     return { providers, signup: o.signup ?? true, minPassword, oauth: { ...o.oauth }, appUrl: (o.appUrl ?? '').replace(/\/$/, '') }
