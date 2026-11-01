@@ -4,3 +4,9 @@ declare module '*.css' {
   const text: string
   export default text
 }
+
+// SVG импортируется как текст (with { type: 'text' }) и отдаётся как favicon.
+declare module '*.svg' {
+  const text: string
+  export default text
+}

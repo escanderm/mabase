@@ -3,11 +3,13 @@
 // при первом запросе, как SDK.
 import cssRaw from './style.css' with { type: 'text' }
 import htmlRaw from './index.html' with { type: 'text' }
+import iconRaw from './icon.svg' with { type: 'text' }
 
 // Bun объявляет *.html как HTMLBundle (сборка фронтенда), но здесь импорт с
 // type: 'text' - это строка. CSS в типах Bun нет вовсе (css.d.ts).
 const css = cssRaw as unknown as string
 const html = htmlRaw as unknown as string
+const icon = iconRaw as unknown as string
 
 const compiled = import.meta.url.includes('$bunfs')
 let js: Promise<string> | null = null
@@ -36,5 +38,6 @@ export async function adminAsset(req: Request, path: string): Promise<Response> 
   if (path === '/_/') return new Response(html, { headers: { ...SECURITY, 'Content-Type': 'text/html; charset=utf-8' } })
   if (path === '/_/app.css') return new Response(css, { headers: { ...SECURITY, 'Content-Type': 'text/css; charset=utf-8' } })
   if (path === '/_/app.js') return new Response(await adminScript(), { headers: { ...SECURITY, 'Content-Type': 'text/javascript; charset=utf-8' } })
+  if (path === '/_/icon.svg') return new Response(icon, { headers: { ...SECURITY, 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600' } })
   return new Response('Нет такого файла', { status: 404, headers: SECURITY })
 }

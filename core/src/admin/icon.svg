@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="MaBase">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00a271"/>
+      <stop offset="1" stop-color="#00543a"/>
+    </linearGradient>
+  </defs>
+  <!-- плитка: один бинарник, одно приложение -->
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <rect x="10" y="10" width="492" height="492" rx="108" fill="none" stroke="#ffffff" stroke-opacity=".14" stroke-width="4"/>
+  <!-- M: документная база -->
+  <path d="M128 366V146h64l64 96 64-96h64v220h-58V246l-68 100h-4l-68-100v120z" fill="#ffffff"/>
+  <!-- точка: запись в журнале -->
+  <circle cx="394" cy="404" r="26" fill="#8cf0c0"/>
+</svg>

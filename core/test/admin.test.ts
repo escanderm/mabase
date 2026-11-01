@@ -227,6 +227,17 @@ describe('админка', () => {
 })
 
 describe('админка: настройки и коллекции', () => {
+  test('216. иконка админки: /_/icon.svg отдаётся как svg и вшита в бинарник', async () => {
+    const r = await fetch(`${s.url}/_/icon.svg`)
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toBe('image/svg+xml')
+    const text = await r.text()
+    expect(text).toContain('<svg')
+    expect(text).toContain('MaBase')
+    // страница ссылается на неё, иначе браузер просит /favicon.ico
+    expect((await call('GET', '/_/')).body).toContain('rel="icon" href="/_/icon.svg"')
+  })
+
   test('135. настройки входа: на ходу, секреты зашифрованы и не уходят наружу, ошибка - ничего не меняется', async () => {
     const get = async () => (await call('GET', '/api/_/settings', { token: su })).body
     const before = await get()
