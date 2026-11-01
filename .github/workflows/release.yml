@@ -1,5 +1,5 @@
-# Тег vX.Y.Z -> тесты, сборки под 4 платформы, релиз на GitHub.
-# Архивы и checksums.txt отсюда скачивает mabase update.
+# Тег vX.Y.Z -> тесты, сборки под 4 платформы, подпись и релиз на GitHub.
+# Архивы, checksums.txt и checksums.txt.sig отсюда скачивает mabase update.
 name: release
 
 on:
@@ -25,15 +25,23 @@ jobs:
       - run: bun run typecheck
       - run: bun test --timeout 180000
       - run: bun run release
+        env:
+          # Ключ публичный: годится и переменная, и секрет - кто куда положил.
+          MABASE_RELEASE_PUBLIC_KEY: ${{ vars.MABASE_RELEASE_PUBLIC_KEY || secrets.MABASE_RELEASE_PUBLIC_KEY }}
+      - run: bun scripts/sign-release.ts
+        env:
+          MABASE_RELEASE_PRIVATE_KEY: ${{ secrets.MABASE_RELEASE_PRIVATE_KEY }}
       - name: Проверить сборки
         run: |
           test "$(dist/release/darwin-arm64/mabase version)" = "${GITHUB_REF_NAME#v}"
           tar -tzf dist/release/mabase-linux-x64.tar.gz
           cd dist/release && shasum -a 256 -c checksums.txt
+          test -f checksums.txt.sig || echo "::warning::checksums.txt.sig нет - релиз без подписи"
       - name: Релиз
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           awk -v v="## ${GITHUB_REF_NAME#v}" '$0 ~ "^## " { p = index($0, v) == 1; next } p' ../CHANGELOG.md > notes.md
-          gh release create "$GITHUB_REF_NAME" --title "MaBase $GITHUB_REF_NAME" --notes-file notes.md \
-            dist/release/*.tar.gz dist/release/checksums.txt
+          files=(dist/release/*.tar.gz dist/release/checksums.txt)
+          if [ -f dist/release/checksums.txt.sig ]; then files+=(dist/release/checksums.txt.sig); fi
+          gh release create "$GITHUB_REF_NAME" --title "MaBase $GITHUB_REF_NAME" --notes-file notes.md "${files[@]}"
