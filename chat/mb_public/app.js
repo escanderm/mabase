@@ -355,8 +355,40 @@ $('delete-room').addEventListener(
   }),
 )
 
+// ---------- вход через Google/GitHub ----------
+
+const OAUTH_NAMES = { google: 'Google', github: 'GitHub' }
+
+// Возврат с #mb_oauth=<код>: меняем код на токены; иначе рисуем кнопки того,
+// что включено в настройках. Ошибку провайдера показываем текстом.
+async function initOAuth() {
+  try {
+    const user = await mb.auth.completeOAuth()
+    if (user) return start()
+  } catch (err) {
+    $('login-error').textContent = err instanceof MabaseError ? err.message : 'Вход не удался'
+  }
+  try {
+    const { providers } = await mb.auth.providers()
+    const list = providers.filter((p) => OAUTH_NAMES[p])
+    if (!list.length) return
+    const box = $('oauth')
+    box.hidden = false
+    box.replaceChildren(
+      ...list.map((p) =>
+        h('button', { type: 'button', class: 'secondary', onclick: safe(async () => { await mb.auth.oauth(p) }) }, `Войти через ${OAUTH_NAMES[p]}`),
+      ),
+    )
+  } catch {
+    /* старый сервер без /api/auth/providers - просто без кнопок */
+  }
+}
+
 // ---------- запуск ----------
 
 const user = await mb.auth.restore().catch(() => null)
 if (user) start()
-else $('login').hidden = false
+else {
+  $('login').hidden = false
+  await initOAuth()
+}

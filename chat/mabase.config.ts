@@ -198,7 +198,8 @@ export default defineConfig({
   collections: [users, rooms, messages, invites, presence],
   actions: [createRoom, invite, acceptInvite, leaveRoom, kick, deleteRoom],
   auth: {
-    providers: ['password'],
+    // providers здесь не задаём: способы входа включаются в админке (_/ -> Настройки),
+    // иначе раздел был бы закреплён за кодом и Google/GitHub не включить.
     accessTtl: '15m',
     refreshTtl: '30d',
   },
