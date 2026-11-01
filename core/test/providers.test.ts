@@ -20,6 +20,34 @@ describe('способы входа', () => {
     expect(createHash('sha256').update('v'.repeat(43)).digest('base64url')).toHaveLength(43)
   })
 
+  test('214. обязательные поля профиля: из настроек, с проверкой имён и приоритетом кода', async () => {
+    const s = await startServer({ dataDir: tmpDir('profile'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false } })
+    try {
+      expect((await call(s.url, 'GET', '/api/auth/providers')).json.profile).toEqual({ required: [] })
+      const setup = await call(s.url, 'POST', '/api/_/setup', undefined, { token: s.setupUrl!.split('/setup/')[1]!, email: 'admin@example.test', password: 'admin-pass-12345' })
+      const token = setup.json.token
+      expect((await call(s.url, 'PUT', '/api/_/settings', token, { profile: { required: ['name', 'avatarUrl'] } })).status).toBe(200)
+      expect((await call(s.url, 'GET', '/api/auth/providers')).json.profile).toEqual({ required: ['name', 'avatarUrl'] })
+      // мусор в имени поля - 400, настройки не меняются
+      expect((await call(s.url, 'PUT', '/api/_/settings', token, { profile: { required: ['name.x'] } })).status).toBe(400)
+      expect((await call(s.url, 'GET', '/api/auth/providers')).json.profile).toEqual({ required: ['name', 'avatarUrl'] })
+    } finally {
+      await s.stop()
+    }
+
+    // код главнее: раздел в админке только показывается
+    const fixed = await startServer({ dataDir: tmpDir('profile2'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false }, auth: { profile: { required: ['name'] } } })
+    try {
+      const setup = await call(fixed.url, 'POST', '/api/_/setup', undefined, { token: fixed.setupUrl!.split('/setup/')[1]!, email: 'admin@example.test', password: 'admin-pass-12345' })
+      expect((await call(fixed.url, 'GET', '/api/auth/providers')).json.profile).toEqual({ required: ['name'] })
+      const view = await call(fixed.url, 'GET', '/api/_/settings', setup.json.token)
+      expect(view.json.fixed.profile).toBe(true)
+      expect((await call(fixed.url, 'PUT', '/api/_/settings', setup.json.token, { profile: { required: [] } })).status).toBe(409)
+    } finally {
+      await fixed.stop()
+    }
+  }, 30_000)
+
   test('213. Яндекс и VK ID включаются в настройках; VK без секрета допустим, Яндекс без секрета - нет', async () => {
     const s = await startServer({ dataDir: tmpDir('providers2'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false } })
     try {
@@ -46,7 +74,7 @@ describe('способы входа', () => {
   test('212. /api/auth/providers: пароль по умолчанию, Google после включения, отказ провайдера', async () => {
     const s = await startServer({ dataDir: tmpDir('providers'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false } })
     try {
-      expect((await call(s.url, 'GET', '/api/auth/providers')).json).toEqual({ providers: ['password'], signup: true })
+      expect((await call(s.url, 'GET', '/api/auth/providers')).json).toMatchObject({ providers: ['password'], signup: true, profile: { required: [] } })
       const setup = await call(s.url, 'POST', '/api/_/setup', undefined, { token: s.setupUrl!.split('/setup/')[1]!, email: 'admin@example.test', password: 'admin-pass-12345' })
       expect(setup.status).toBe(200)
       const token = setup.json.token

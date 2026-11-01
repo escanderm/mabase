@@ -234,7 +234,12 @@ class AuthClient {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phoneNumber: phone }),
         })
-        if (!res.ok) throw new MabaseError(res.status === 429 ? 'too_many_requests' : 'unavailable', 'authphone.su не выдал код', res.status)
+        if (res.ok) return
+        // authphone.su: 400 - номер не в международном формате, 429 - больше
+        // 5 запросов с IP за 3 минуты. Остальное - сервис недоступен.
+        const code = res.status === 429 ? 'too_many_requests' : res.status === 400 ? 'bad_request' : 'unavailable'
+        const text = res.status === 429 ? 'Слишком часто: больше 5 кодов за 3 минуты' : res.status === 400 ? 'Проверьте номер: нужен формат +7 900 000-00-00' : 'authphone.su не выдал код'
+        throw new MabaseError(code, text, res.status)
       },
       verify: async (phone, code) => this.set(await mb.request('POST', '/api/auth/phone', { phone, code })),
     }
@@ -323,7 +328,7 @@ class AuthClient {
   unlink = (provider: string) => this.mb.request<void>('DELETE', `/api/auth/oauth/${encodeURIComponent(provider)}`)
 
   // Что включено: какие кнопки входа рисовать.
-  providers = () => this.mb.request<{ providers: string[]; signup: boolean }>('GET', '/api/auth/providers')
+  providers = () => this.mb.request<{ providers: string[]; signup: boolean; profile: { required: string[] } }>('GET', '/api/auth/providers')
 
   // Токен истекает - обновить до запроса.
   /** @internal */ async fresh(): Promise<void> {

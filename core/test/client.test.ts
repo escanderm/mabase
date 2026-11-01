@@ -442,7 +442,17 @@ describe('SDK: гонки', () => {
     alice.close()
     await s.stop()
   })
+
+  test('автофон: 400 - понятная ошибка номера, 429 - слишком часто', async () => {
+    const memory = () => {
+      const m = new Map<string, string>()
+      return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k) }
+    }
+    for (const [status, code] of [[400, 'bad_request'], [429, 'too_many_requests'], [500, 'unavailable']] as const) {
+      const mb = createClient('http://x', { storage: memory(), sessionStorage: memory(), fetch: (async () => new Response('{}', { status })) as any })
+      await expect(mb.auth.phone.start('+7 900 000-00-00')).rejects.toMatchObject({ code })
+    }
+  })
 })
 
 void createHash
-

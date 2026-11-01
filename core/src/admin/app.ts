@@ -1708,10 +1708,11 @@ function dropCollectionDialog(name: string, count: number): void {
 // ---------- настройки ----------
 
 type Settings = {
-  fixed: { auth: boolean; mail: boolean; storage: boolean }
+  fixed: { auth: boolean; mail: boolean; storage: boolean; profile: boolean }
   auth: any
   mail: any
   storage?: { s3?: Record<string, any> }
+  profile?: { required?: string[] }
   callbacks: Record<string, string>
   db: { systemFields: { name: string; type: string; about: string }[]; limits: Record<string, number>; dir: string }
 }
@@ -1782,6 +1783,40 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
     authErr,
   )
   if (ro) for (const el of authForm.querySelectorAll('input')) (el as HTMLInputElement).disabled = true
+
+  // ----- профиль после регистрации -----
+  // Какие поля спрашивать после входа: у разных проектов разные (имя, аватар,
+  // телефон). Список - из схемы users, чтобы не выдумывать имена полей.
+  const prof = s.profile ?? {}
+  const pro = s.fixed.profile
+  const profBox = h('div', { class: 'sub' }, h('p', { class: 'faint' }, 'Загружаю поля схемы users…'))
+  const profErr = h('div', { class: 'error-text' })
+  const want = new Set(prof.required ?? [])
+  api('GET', 'c/users/meta')
+    .then((m: any) => {
+      const props = Object.keys(m?.schema?.properties ?? {})
+      const skip = new Set(['_id', '_createdAt', '_updatedAt', 'email', 'phone', 'passwordHash', 'roles', 'verified'])
+      const fields = props.filter((f) => !skip.has(f))
+      if (!fields.length) {
+        profBox.replaceChildren(h('p', { class: 'faint' }, 'У коллекции users нет схемы - выбирать не из чего. Задайте поля в mabase.config.ts.'))
+        return
+      }
+      profBox.replaceChildren(...fields.map((f) => {
+        const [row, box] = check(f, want.has(f), 'спрашивать после входа, если пусто')
+        box.dataset.field = f
+        return row
+      }))
+    })
+    .catch(() => profBox.replaceChildren(h('p', { class: 'faint' }, 'Не удалось загрузить схему users')))
+  const profileForm = h(
+    'div',
+    { class: 'panel' },
+    h('h2', {}, 'Профиль после регистрации', pro && h('span', { class: 'badge warn' }, ' задано в mabase.config.ts')),
+    h('p', { class: 'muted' }, 'Эти поля клиент спрашивает после входа, если они пустые: у аккаунта по телефону нет имени, у части провайдеров - аватара. Пароль, email и телефон - не здесь.'),
+    profBox,
+    profErr,
+  )
+  if (pro) for (const el of profileForm.querySelectorAll('input')) (el as HTMLInputElement).disabled = true
 
   // ----- почта -----
   const M = s.mail ?? {}
@@ -1872,7 +1907,7 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
   if (sro) for (const el of storageForm.querySelectorAll('input')) (el as HTMLInputElement).disabled = true
 
   const save = async (): Promise<boolean> => {
-    authErr.textContent = mailErr.textContent = s3Err.textContent = ''
+    authErr.textContent = mailErr.textContent = s3Err.textContent = profErr.textContent = ''
     const body: any = {}
     if (!ro)
       body.auth = {
@@ -1887,6 +1922,7 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
         appUrl: appUrl.value.trim(),
       }
     if (!mro) body.mail = { mode: mode.value, from: from.value, appName: appName.value, smtp: { host: host.value, port: port.value ? Number(port.value) : undefined, secure: tls.checked, user: user.value, pass: pass.value } }
+    if (!pro) body.profile = { required: [...profileForm.querySelectorAll('input[data-field]')].filter((el) => (el as HTMLInputElement).checked).map((el) => (el as HTMLInputElement).dataset.field) }
     if (!sro)
       body.storage = s3on.checked
         ? {
@@ -1908,7 +1944,8 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
       return true
     } catch (e) {
       const t = errorText(e)
-      if (/s3|хранилищ|бакет|bucket|endpoint/i.test(t)) s3Err.textContent = t
+      if (/профил/i.test(t)) profErr.textContent = t
+      else if (/s3|хранилищ|бакет|bucket|endpoint/i.test(t)) s3Err.textContent = t
       else if (/почт|smtp|mail/i.test(t)) mailErr.textContent = t
       else authErr.textContent = t
       return false
@@ -1953,7 +1990,7 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
       h('button', { class: 'btn', onclick: () => (location.hash = '#/') }, 'Пропустить - оставить по умолчанию'),
     )
   } else if (!ro || !mro) buttons.append(h('button', { class: 'btn primary', onclick: () => save() }, 'Сохранить'))
-  page.append(authForm, mailForm, storageForm, buttons)
+  page.append(authForm, profileForm, mailForm, storageForm, buttons)
   if (!first && base) page.append(base)
 }
 

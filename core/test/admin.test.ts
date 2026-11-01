@@ -230,7 +230,7 @@ describe('админка: настройки и коллекции', () => {
   test('135. настройки входа: на ходу, секреты зашифрованы и не уходят наружу, ошибка - ничего не меняется', async () => {
     const get = async () => (await call('GET', '/api/_/settings', { token: su })).body
     const before = await get()
-    expect(before.fixed).toEqual({ auth: false, mail: false, storage: false })
+    expect(before.fixed).toEqual({ auth: false, mail: false, storage: false, profile: false })
     expect(before.db.systemFields.map((f: any) => f.name)).toEqual(['_id', '_createdAt', '_updatedAt'])
     expect(before.callbacks.google).toBe(`${s.url}/api/auth/oauth/google/callback`)
 

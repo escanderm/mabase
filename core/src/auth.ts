@@ -47,6 +47,9 @@ export type AuthOptions = {
   authphone?: { url?: string; timeoutMs?: number }
   oauth?: Partial<Record<OAuthProviderName, OAuthClient>> // ключи - из переменных окружения
   oauthFields?: (profile: OAuthProfile) => Record<string, unknown> // поля нового пользователя; по умолчанию { name }
+  // Какие поля профиля обязательны после входа (например ['name']): их
+  // спрашивает клиент, а список отдаётся в /api/auth/providers.
+  profile?: { required?: string[] }
   mail?: Mailer // нет - режим разработки: письма в консоль
   appUrl?: string // фронтенд: ссылки в письмах ведут сюда
   mailIntervalMs?: number // одно письмо одного вида пользователю не чаще; по умолчанию минута
@@ -56,7 +59,7 @@ export type AuthOptions = {
 }
 
 // Что можно менять на ходу (настройки админки).
-export type AuthSettings = Pick<AuthOptions, 'providers' | 'signup' | 'minPasswordLength' | 'oauth' | 'appUrl'>
+export type AuthSettings = Pick<AuthOptions, 'providers' | 'signup' | 'minPasswordLength' | 'oauth' | 'appUrl' | 'profile'>
 
 export type Session = {
   user: Doc // как его видит сам пользователь: без passwordHash
@@ -259,6 +262,7 @@ export class Auth {
   private now: () => number
   private dummy: Promise<string> | null = null
   private oauth: Partial<Record<OAuthProviderName, OAuthClient>> = {}
+  private profileRequired: string[] = []
   readonly mail: Mailer
   private appUrl!: string
   private mailIntervalMs: number
@@ -300,8 +304,13 @@ export class Auth {
   // Способы входа, регистрация, OAuth, адрес приложения. Из конфига при
   // старте или из настроек админки на ходу. Ошибка - ничего не меняется.
   // Что включено сейчас: фронтенду нужно знать, какие кнопки входа рисовать.
-  listProviders(): { providers: AuthProvider[]; signup: boolean } {
-    return { providers: [...this.providers], signup: this.signup }
+  listProviders(): { providers: AuthProvider[]; signup: boolean; profile: { required: string[] } } {
+    return { providers: [...this.providers], signup: this.signup, profile: { required: [...this.profileRequired] } }
+  }
+
+  // Обязательные поля профиля: из настроек админки или кода.
+  setProfile(required: unknown): void {
+    this.profileRequired = checkProfileRequired(required)
   }
 
   configure(o: AuthSettings): void {
@@ -311,6 +320,7 @@ export class Auth {
     this.minPassword = c.minPassword
     this.oauth = c.oauth
     this.appUrl = c.appUrl
+    this.profileRequired = c.profile.required
   }
 
   static check(o: AuthSettings, mailMode: Mailer['mode']) {
@@ -332,9 +342,10 @@ export class Auth {
     if (mailMode !== 'dev' && !o.appUrl) {
       throw new TypeError('Нужен адрес приложения: auth.appUrl в mabase.config.ts или MABASE_APP_URL - на него ведут ссылки из писем')
     }
+    const profile = { required: checkProfileRequired(o.profile?.required) }
     const minPassword = o.minPasswordLength ?? 8
     if (!Number.isInteger(minPassword) || minPassword < 6 || minPassword > 128) throw new TypeError('auth.minPasswordLength: от 6 до 128')
-    return { providers, signup: o.signup ?? true, minPassword, oauth: { ...o.oauth }, appUrl: (o.appUrl ?? '').replace(/\/$/, '') }
+    return { providers, signup: o.signup ?? true, minPassword, oauth: { ...o.oauth }, appUrl: (o.appUrl ?? '').replace(/\/$/, ''), profile }
   }
 
   get settings(): Required<Pick<AuthSettings, 'providers' | 'signup' | 'minPasswordLength' | 'appUrl'>> {
@@ -935,4 +946,18 @@ export class Auth {
     if (res.status >= 500 || (res.ok && !body)) throw unavailable()
     return res.ok && body.status === 'ok'
   }
+}
+
+// Поля профиля после регистрации: только простые имена полей (без точек и
+// служебных), чтобы клиент мог показать форму, а PATCH - пройти по схеме.
+export function checkProfileRequired(v: unknown): string[] {
+  if (v === undefined || v === null) return []
+  if (!Array.isArray(v)) throw new TypeError('profile.required - список полей')
+  const out: string[] = []
+  for (const f of v) {
+    if (typeof f !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(f)) throw new TypeError(`profile.required: недопустимое поле ${String(f)}`)
+    if (!out.includes(f)) out.push(f)
+  }
+  if (out.length > 50) throw new TypeError('profile.required: не больше 50 полей')
+  return out
 }

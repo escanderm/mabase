@@ -11,7 +11,7 @@
 // - Ошибка в настройках - ничего не меняется: и вход, и почта проверяются
 //   до сохранения.
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
-import { Auth, type AuthProvider, type AuthSettings } from './auth'
+import { Auth, checkProfileRequired, type AuthProvider, type AuthSettings } from './auth'
 import type { Db } from './db'
 import { ActionError } from './errors'
 import { S3Storage, type S3Options } from './files'
@@ -38,6 +38,9 @@ export type StoredSettings = {
     appName?: string
     smtp?: { host?: string; port?: number; secure?: boolean; user?: string; pass?: string }
   }
+  // Поля профиля, которые клиент спрашивает после входа: у разных проектов
+  // они разные (имя, аватар, телефон), а имя провайдеры отдают не всегда.
+  profile?: { required?: string[] }
   // Нет s3 - файлы в локальной папке. Секреты шифруются, как у почты.
   storage?: {
     s3?: {
@@ -53,7 +56,7 @@ export type StoredSettings = {
   }
 }
 
-export type SettingsView = StoredSettings & { fixed: { auth: boolean; mail: boolean; storage: boolean } }
+export type SettingsView = StoredSettings & { fixed: { auth: boolean; mail: boolean; storage: boolean; profile: boolean } }
 
 export type SettingsOptions = {
   // Применить хранилище файлов: null - локальная папка. Вызывается при старте
@@ -75,7 +78,7 @@ export class Settings {
     secret: string,
     private auth: Auth,
     private mail: Mailer,
-    readonly fixed: { auth: boolean; mail: boolean; storage: boolean },
+    readonly fixed: { auth: boolean; mail: boolean; storage: boolean; profile: boolean },
     private opts: SettingsOptions = {},
   ) {
     this.key = createHash('sha256').update(`mabase-settings:${secret}`).digest()
@@ -118,6 +121,7 @@ export class Settings {
         : auth,
       mail: this.fixed.mail ? { mode: this.mail.mode === 'dev' ? 'dev' : 'smtp', appName: this.mail.appName } : mail,
       storage,
+      profile: this.fixed.profile ? { required: this.auth.listProviders().profile.required } : this.current.profile,
     }
   }
 
@@ -126,10 +130,12 @@ export class Settings {
     if (patch.auth && this.fixed.auth) throw new ActionError('conflict', 'Вход задан в mabase.config.ts - меняйте там')
     if (patch.mail && this.fixed.mail) throw new ActionError('conflict', 'Почта задана в mabase.config.ts - меняйте там')
     if (patch.storage && this.fixed.storage) throw new ActionError('conflict', 'Файлы (S3) заданы в mabase.config.ts или env - меняйте там')
+    if (patch.profile && this.fixed.profile) throw new ActionError('conflict', 'Поля профиля заданы в mabase.config.ts - меняйте там')
     const next: StoredSettings = {
       auth: patch.auth ? clean(patch.auth, this.current.auth) : this.current.auth,
       mail: patch.mail ? cleanMail(patch.mail, this.current.mail) : this.current.mail,
       storage: patch.storage ? cleanStorage(patch.storage, this.current.storage) : this.current.storage,
+      profile: patch.profile ? cleanProfile(patch.profile) : this.current.profile,
     }
     try {
       this.apply(next) // проверка и применение; ошибка - ничего не поменялось
@@ -149,6 +155,7 @@ export class Settings {
     if (mailOpts) this.mail.configure(mailOpts)
     if (authOpts) this.auth.configure(authOpts)
     if (!this.fixed.storage) this.opts.onStorage?.(toStorage(s.storage))
+    if (!this.fixed.profile) this.auth.setProfile(s.profile?.required)
   }
 
   private liveStorageView(): StoredSettings['storage'] {
@@ -191,6 +198,14 @@ function mapSecrets(s: StoredSettings, f: (v: string) => string): StoredSettings
   if (s3?.secretAccessKey) s3.secretAccessKey = f(s3.secretAccessKey)
   if (s3?.sessionToken) s3.sessionToken = f(s3.sessionToken)
   return out
+}
+
+function cleanProfile(p: NonNullable<StoredSettings['profile']>): StoredSettings['profile'] {
+  try {
+    return { required: checkProfileRequired(p.required) }
+  } catch (err) {
+    throw bad((err as Error).message)
+  }
 }
 
 function maskStorage(s: StoredSettings['storage']): StoredSettings['storage'] {

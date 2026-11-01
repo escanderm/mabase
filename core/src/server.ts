@@ -180,6 +180,7 @@ export async function openApp(cfg: ServerConfig): Promise<App> {
       auth: ['providers', 'signup', 'oauth', 'appUrl', 'minPasswordLength'].some((k) => (a as any)[k] !== undefined),
       mail: !!(cfg.mail?.smtp || cfg.mail?.send),
       storage: !!cfg.storage?.s3, // конфиг/env главнее админки
+      profile: cfg.auth?.profile !== undefined,
     }
     // Файлы: смена настроек в админке переключает хранилище без перезапуска.
     // Старые файлы остаются там, где лежали - их переносит `files migrate`.
