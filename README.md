@@ -878,6 +878,21 @@ bun run build       # core/dist/mabase под эту машину
 bun run release     # архивы под все платформы и checksums.txt
 ```
 
+### Выпуск релиза
+
+1. Поднимите версию в `core/src/version.ts` и добавьте раздел `## X.Y.Z` в
+   `CHANGELOG.md` (из него CI берёт текст релиза).
+2. Один раз настройте подпись: `cd core && bun scripts/keygen.ts` напечатает
+   две строки. `MABASE_RELEASE_PUBLIC_KEY` положите в переменные репозитория
+   (Settings -> Variables -> Actions), `MABASE_RELEASE_PRIVATE_KEY` - в
+   секреты. Приватный ключ больше нигде не храните: без него подпись прошлых
+   релизов не проверить, а с ним можно подписать что угодно.
+3. `git tag vX.Y.Z && git push origin main --tags`. CI прогонит тесты и
+   typecheck, соберёт 4 платформы, подпишет `checksums.txt` и выложит релиз.
+
+Без переменной публичного ключа сборка выйдет без подписи: `mabase update`
+такой релиз поставит, но предупредит, что проверяет только sha256.
+
 Проверка типов - в CI на каждой правке (`.github/workflows/ci.yml`). Раньше
 `tsconfig.json` обещал `strict`, но ничего его не проверяло: Bun типы просто
 вырезает.
