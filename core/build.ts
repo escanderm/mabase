@@ -16,8 +16,7 @@ import { $ } from 'bun'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { VERSION } from './src/version'
-import { buildAdmin } from './src/admin/bundle'
-import { buildSdk } from './src/sdk'
+import { generate } from './src/generate'
 import { assetName, tar } from './src/update'
 
 // x64 - baseline: дешёвые VPS часто отдают процессор без AVX2, Rosetta - тоже
@@ -33,34 +32,11 @@ const tag = process.env.GITHUB_REF_NAME
 if (release && tag?.startsWith('v') && tag !== `v${VERSION}`) throw new Error(`тег ${tag}, а в cli.ts VERSION = ${VERSION}`)
 if (release && process.platform !== 'darwin') throw new Error('релиз собирается на macOS: сборки под macOS нужно переподписать')
 
-// SDK для /api/client.js - внутрь бинарника
-const sdk = await buildSdk()
-mkdirSync('src/generated', { recursive: true })
-writeFileSync('src/generated/client.ts', `// Сгенерировано build.ts - не править\nexport default ${JSON.stringify(sdk)}\n`)
+// SDK, скрипт админки, типы zod и ключ подписи - в src/generated.
+// Раньше это лежало прямо здесь; теперь общий generate() (его же зовут
+// typecheck и тесты в чистом клоне).
+const { sdk } = await generate()
 await Bun.write('dist/client.js', sdk)
-// Скрипт админки /_/ - тоже внутрь
-writeFileSync('src/generated/admin.ts', `// Сгенерировано build.ts - не править\nexport default ${JSON.stringify(await buildAdmin())}\n`)
-
-// Типы zod для редактора: в бинарнике node_modules нет, поэтому .d.ts
-// вшиваются сюда (src/editor.ts пишет их в mb_data/types/zod).
-const zodTypes: Record<string, string> = {}
-const walkZod = (dir: string, rel: string) => {
-  for (const name of readdirSync(dir)) {
-    const abs = join(dir, name)
-    const next = rel ? `${rel}/${name}` : name
-    if (statSync(abs).isDirectory()) walkZod(abs, next)
-    else if (name.endsWith('.d.ts')) zodTypes[next] = readFileSync(abs, 'utf8')
-  }
-}
-walkZod(join(import.meta.dir, 'node_modules', 'zod'), '')
-writeFileSync('src/generated/zod-types.ts', `// Сгенерировано build.ts - не править\nexport default ${JSON.stringify(zodTypes)} as Record<string, string>\n`)
-
-// Публичный ключ подписи релизов: вшивается в бинарник. Пусто - сборка без
-// проверки подписи (mabase update честно предупредит).
-writeFileSync(
-  'src/generated/release.ts',
-  `// Сгенерировано build.ts - не править\nexport const RELEASE_PUBLIC_KEY = ${JSON.stringify(process.env.MABASE_RELEASE_PUBLIC_KEY ?? '')}\n`,
-)
 
 async function compile(out: string, target?: string): Promise<void> {
   const local = target && process.env.BUN_TARGETS_DIR && join(process.env.BUN_TARGETS_DIR, target)

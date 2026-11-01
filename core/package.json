@@ -3,8 +3,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "bun test --timeout 180000",
-    "typecheck": "tsc --noEmit",
+    "test": "bun scripts/generate.ts && bun test --timeout 180000",
+    "typecheck": "bun scripts/generate.ts && tsc --noEmit",
     "bench": "bun bench/query.ts",
     "build": "bun build.ts",
     "release": "bun build.ts --release"

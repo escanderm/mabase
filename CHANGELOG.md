@@ -1,5 +1,15 @@
 # Изменения
 
+## 0.2.22
+
+- Починена CI: в чистом клоне `src/generated/*` нет (они в `.gitignore`), а
+  `tsc` и сервер их импортируют - typecheck падал на `Cannot find module
+  '../generated/admin'`. Теперь `bun run typecheck` и `bun run test` сначала
+  зовут `scripts/generate.ts` (SDK, админка, типы zod, ключ подписи), а
+  `build.ts` использует тот же `src/generate.ts`.
+- Иконка сервиса из 0.2.21 входит в этот релиз: `/_/icon.svg` в админке,
+  `favicon.svg`/`favicon-32.png`/`apple-touch-icon.png` в примере чата.
+
 ## 0.2.21
 
 - Ссылка на Telegram-бота AuthPhone теперь тоже с `?start=start` - как у MAX:
