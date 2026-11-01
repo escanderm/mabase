@@ -55,12 +55,117 @@ $('login-form').addEventListener('submit', async (e) => {
   try {
     if (mode === 'register') await mb.auth.register({ email, password, data: { name: f.get('name') || email.split('@')[0] } })
     else await mb.auth.login({ email, password })
-    start()
+    await afterLogin()
   } catch (err) {
     $('login-error').textContent =
       err instanceof MabaseError ? (err.code === 'invalid_credentials' ? RU.invalid_credentials : err.message) : 'Сервер недоступен'
   }
 })
+
+// Вход по телефону: код запрашивает браузер (лимит authphone.su - на IP
+// пользователя), проверяет сервер. Имени у такого аккаунта нет - спросим ниже.
+// Ошибки телефона показываем в форме входа, а не тостом: там их и ждут.
+const phoneFlow = async (fn) => {
+  $('login-error').textContent = ''
+  try {
+    await fn()
+  } catch (err) {
+    $('login-error').textContent = err instanceof MabaseError ? err.message : 'Сервер недоступен'
+  }
+}
+
+$('phone-send').addEventListener('click', () =>
+  phoneFlow(async () => {
+    const phone = $('login-form').querySelector('input[name=phone]').value.trim()
+    if (!phone) throw new MabaseError('bad_request', 'Введите номер телефона')
+    await mb.auth.phone.start(phone)
+    toast('Код отправлен в Telegram или MAX')
+  }),
+)
+
+$('phone-login').addEventListener('click', () =>
+  phoneFlow(async () => {
+    const form = $('login-form')
+    const phone = form.querySelector('input[name=phone]').value.trim()
+    const code = form.querySelector('input[name=code]').value.trim()
+    if (!phone || !code) throw new MabaseError('bad_request', 'Введите номер и код')
+    await mb.auth.phone.verify(phone, code)
+    await afterLogin()
+  }),
+)
+
+// Профиль: какие поля обязательны, решает проект (настройки -> «Профиль
+// после регистрации», список отдаёт /api/auth/providers). У аккаунта по
+// телефону нет имени, у части провайдеров - аватара: спрашиваем то, что пусто.
+const FIELD_LABELS = { name: 'Как вас зовут?', avatarUrl: 'Ссылка на аватар', phone: 'Телефон', about: 'О себе' }
+
+function askProfile(fields) {
+  return new Promise((resolve) => {
+    const inputs = new Map()
+    const err = h('p', { class: 'error' })
+    const rows = fields.map((f) => {
+      const input = h('input', {
+        maxlength: '200',
+        autocomplete: f === 'name' ? 'nickname' : 'off',
+        ...(f.toLowerCase().endsWith('url') ? { type: 'url', placeholder: 'https://…' } : {}),
+      })
+      inputs.set(f, input)
+      return h('label', { class: 'row' }, h('span', { class: 'hint' }, FIELD_LABELS[f] ?? f), input)
+    })
+    const save = h('button', { class: 'primary' }, 'Сохранить')
+    const box = h(
+      'div',
+      { class: 'modal' },
+      h('h2', {}, 'Заполните профиль'),
+      h('p', { class: 'hint' }, 'Это увидят участники ваших комнат.'),
+      ...rows,
+      err,
+      save,
+    )
+    const overlay = h('div', { class: 'modal-overlay' }, box)
+    const submit = async () => {
+      const values = {}
+      for (const [f, input] of inputs) {
+        const v = input.value.trim()
+        if (!v) {
+          err.textContent = 'Заполните все поля'
+          return
+        }
+        values[f] = v
+      }
+      save.disabled = true
+      try {
+        await mb.c.users.update(mb.auth.user.id, { $set: values })
+        overlay.remove()
+        resolve(values)
+      } catch (e) {
+        err.textContent = e instanceof MabaseError ? e.message : 'Не сохранилось'
+        save.disabled = false
+      }
+    }
+    save.addEventListener('click', submit)
+    box.addEventListener('keydown', (e) => e.key === 'Enter' && submit())
+    document.body.append(overlay)
+    inputs.values().next().value?.focus()
+  })
+}
+
+// После любого входа: не хватает обязательных полей - спрашиваем и
+// перезагружаем (сессия на месте, профиль уже сохранён).
+async function afterLogin() {
+  const me = mb.auth.user
+  let required = []
+  try {
+    required = (await mb.auth.providers()).profile?.required ?? []
+  } catch {}
+  const missing = required.filter((f) => me[f] === undefined || me[f] === null || me[f] === '')
+  if (missing.length) {
+    await askProfile(missing)
+    location.reload()
+    return
+  }
+  start()
+}
 
 let leaving = false // свой выход: перезагрузить после запроса к серверу, а не до
 $('logout').addEventListener('click', async () => {
@@ -104,7 +209,7 @@ function start() {
   // Профили - только тех, с кем общая комната (правило users).
   mb.live('users', {}).subscribe((list) => {
     names.clear()
-    for (const u of list) names.set(u._id, u.name ?? u.email ?? u._id)
+    for (const u of list) names.set(u._id, u.name ?? u.email ?? u.phone ?? u._id)
     renderOnline()
     if (current) renderMessages()
   })
@@ -364,7 +469,7 @@ const OAUTH_NAMES = { google: 'Google', github: 'GitHub', yandex: 'Яндекс'
 async function initOAuth() {
   try {
     const user = await mb.auth.completeOAuth()
-    if (user) return start()
+    if (user) return afterLogin()
   } catch (err) {
     $('login-error').textContent = err instanceof MabaseError ? err.message : 'Вход не удался'
   }

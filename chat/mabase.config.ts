@@ -11,10 +11,12 @@ async function roomIdsOf(db: Db, userId: string): Promise<string[]> {
   return rooms.map((r) => r._id)
 }
 
-// Все, с кем у пользователя есть общая комната, включая его самого.
+// Все, с кем у пользователя есть общая комната, включая его самого: без этого
+// новый аккаунт без комнат не видел даже собственный профиль (и не мог
+// сохранить имя после входа по телефону).
 async function contactsOf(db: Db, userId: string): Promise<string[]> {
   const rooms = await db.rooms.find({ participants: userId }, { fields: ['participants'] })
-  return [...new Set(rooms.flatMap((r) => r.participants))]
+  return [...new Set([userId, ...rooms.flatMap((r) => r.participants)])]
 }
 
 // ---------- коллекции ----------
@@ -23,7 +25,9 @@ async function contactsOf(db: Db, userId: string): Promise<string[]> {
 // Здесь её только расширяем своими полями и правилами.
 const users = defineCollection('users', {
   schema: z.object({
-    name: z.string().min(1).max(40),
+    // Имя не обязательно в базе: аккаунт по телефону создаётся без него,
+    // а приложение спрашивает имя после первого входа (mb_public/app.js).
+    name: z.string().min(1).max(40).optional(),
     avatarUrl: z.string().url().optional(),
   }),
   fields: {

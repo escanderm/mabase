@@ -18,6 +18,14 @@
         <button name="mode" value="login">Войти</button>
         <button name="mode" value="register" class="secondary">Зарегистрироваться</button>
       </div>
+      <details class="phone">
+        <summary>Вход по телефону</summary>
+        <div class="row"><input name="phone" type="tel" placeholder="+7 900 000-00-00" autocomplete="tel"></div>
+        <div class="row"><button id="phone-send" type="button" class="secondary">Получить код</button></div>
+        <div class="row"><input name="code" inputmode="numeric" maxlength="6" placeholder="Код из Telegram или MAX" autocomplete="one-time-code"></div>
+        <div class="row"><button id="phone-login" type="button">Войти по коду</button></div>
+        <p class="hint">Код приходит в бот AuthPhone (Telegram или MAX), номер должен быть привязан к нему.</p>
+      </details>
       <div id="oauth" class="row" hidden></div>
       <p class="hint">Тестовые: alice@example.test / dev-alice-1, bob@example.test / dev-bob-1, carol@example.test / dev-carol-1 (после <code>mabase seed</code>)</p>
       <p id="login-error" class="error"></p>
