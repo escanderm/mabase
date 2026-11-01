@@ -20,6 +20,32 @@ describe('способы входа', () => {
     expect(createHash('sha256').update('v'.repeat(43)).digest('base64url')).toHaveLength(43)
   })
 
+  test('215. телефон: ссылки на ботов AuthPhone в /api/auth/providers, свой сервис может их убрать', async () => {
+    const s = await startServer({ dataDir: tmpDir('bots'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false } })
+    try {
+      const setup = await call(s.url, 'POST', '/api/_/setup', undefined, { token: s.setupUrl!.split('/setup/')[1]!, email: 'admin@example.test', password: 'admin-pass-12345' })
+      const token = setup.json.token
+      // пока телефон выключен, ссылок нет
+      expect((await call(s.url, 'GET', '/api/auth/providers')).json.authphone).toBeUndefined()
+      const auth = { password: true, signup: true, minPasswordLength: 8, appUrl: 'http://127.0.0.1:8090', phone: true }
+      expect((await call(s.url, 'PUT', '/api/_/settings', token, { auth })).status).toBe(200)
+      const p = (await call(s.url, 'GET', '/api/auth/providers')).json
+      expect(p.providers).toContain('authphone')
+      expect(p.authphone).toEqual({ telegram: 'https://t.me/myauth_superbot', max: 'https://max.ru/id773001707708_1_bot?start=start' })
+    } finally {
+      await s.stop()
+    }
+
+    // свой сервис: пустая ссылка - кнопки нет
+    const own = await startServer({ dataDir: tmpDir('bots2'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false }, auth: { providers: ['authphone'], authphone: { bots: { telegram: 'https://t.me/own_bot', max: '' } } } })
+    try {
+      const p = (await call(own.url, 'GET', '/api/auth/providers')).json
+      expect(p.authphone).toEqual({ telegram: 'https://t.me/own_bot' })
+    } finally {
+      await own.stop()
+    }
+  }, 30_000)
+
   test('214. обязательные поля профиля: из настроек, с проверкой имён и приоритетом кода', async () => {
     const s = await startServer({ dataDir: tmpDir('profile'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false } })
     try {

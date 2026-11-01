@@ -328,7 +328,11 @@ class AuthClient {
   unlink = (provider: string) => this.mb.request<void>('DELETE', `/api/auth/oauth/${encodeURIComponent(provider)}`)
 
   // Что включено: какие кнопки входа рисовать.
-  providers = () => this.mb.request<{ providers: string[]; signup: boolean; profile: { required: string[] } }>('GET', '/api/auth/providers')
+  providers = () =>
+    this.mb.request<{ providers: string[]; signup: boolean; profile: { required: string[] }; authphone?: { telegram?: string; max?: string } }>(
+      'GET',
+      '/api/auth/providers',
+    )
 
   // Токен истекает - обновить до запроса.
   /** @internal */ async fresh(): Promise<void> {

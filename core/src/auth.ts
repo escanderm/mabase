@@ -44,7 +44,9 @@ export type AuthOptions = {
   minPasswordLength?: number
   hashConcurrency?: number // одновременных хэшей argon2id; каждый берёт 64 МБ памяти
   loginLimit?: { attempts: number; windowMs: number } // на email или телефон вместе с IP
-  authphone?: { url?: string; timeoutMs?: number }
+  // Боты, где пользователь делится номером и получает код. Пустая строка -
+  // не показывать кнопку (свой сервис вместо authphone.su).
+  authphone?: { url?: string; timeoutMs?: number; bots?: { telegram?: string; max?: string } }
   oauth?: Partial<Record<OAuthProviderName, OAuthClient>> // ключи - из переменных окружения
   oauthFields?: (profile: OAuthProfile) => Record<string, unknown> // поля нового пользователя; по умолчанию { name }
   // Какие поля профиля обязательны после входа (например ['name']): их
@@ -88,6 +90,10 @@ type TokenKind = keyof typeof LETTERS
 // после сброса пароля оставалась рабочей: укравший сессию у аккаунта без
 // пароля успевал увести email себе, а вместе с ним и аккаунт.
 const PASSWORD_BOUND = { $in: ['session', 'reset', 'email', 'verify'] }
+
+// Куда идти за кодом: боты authphone.su. Ссылки отдаются клиенту, чтобы
+// пример не хардкодил их, а свой сервис мог подставить свои.
+const AUTHPHONE_BOTS = { telegram: 'https://t.me/myauth_superbot', max: 'https://max.ru/id773001707708_1_bot?start=start' }
 
 const OAUTH_STATE_MS = 10 * 60_000 // пользователь у провайдера
 const OAUTH_CODE_MS = 60_000 // одноразовый код от колбэка до SDK
@@ -263,6 +269,7 @@ export class Auth {
   private dummy: Promise<string> | null = null
   private oauth: Partial<Record<OAuthProviderName, OAuthClient>> = {}
   private profileRequired: string[] = []
+  private authphoneBots: { telegram?: string; max?: string } = {}
   readonly mail: Mailer
   private appUrl!: string
   private mailIntervalMs: number
@@ -292,6 +299,7 @@ export class Auth {
     this.attempts = new Attempts(Math.max(limit.attempts * 5, 20), limit.windowMs, this.now)
     this.ipAttempts = new Attempts(limit.attempts, limit.windowMs, this.now)
     this.authphoneUrl = (opts.authphone?.url ?? 'https://authphone.su').replace(/\/$/, '')
+    this.authphoneBots = { ...AUTHPHONE_BOTS, ...(opts.authphone?.bots ?? {}) }
     this.authphoneTimeout = opts.authphone?.timeoutMs ?? 5000
     this.fetch = opts.fetch ?? ((url, init) => fetch(url, init))
     this.mailIntervalMs = opts.mailIntervalMs ?? 60_000
@@ -304,8 +312,15 @@ export class Auth {
   // Способы входа, регистрация, OAuth, адрес приложения. Из конфига при
   // старте или из настроек админки на ходу. Ошибка - ничего не меняется.
   // Что включено сейчас: фронтенду нужно знать, какие кнопки входа рисовать.
-  listProviders(): { providers: AuthProvider[]; signup: boolean; profile: { required: string[] } } {
-    return { providers: [...this.providers], signup: this.signup, profile: { required: [...this.profileRequired] } }
+  listProviders(): { providers: AuthProvider[]; signup: boolean; profile: { required: string[] }; authphone?: { telegram?: string; max?: string } } {
+    const out: ReturnType<Auth['listProviders']> = { providers: [...this.providers], signup: this.signup, profile: { required: [...this.profileRequired] } }
+    if (this.providers.has('authphone')) {
+      const bots: { telegram?: string; max?: string } = {}
+      if (this.authphoneBots.telegram) bots.telegram = this.authphoneBots.telegram
+      if (this.authphoneBots.max) bots.max = this.authphoneBots.max
+      out.authphone = bots
+    }
+    return out
   }
 
   // Обязательные поля профиля: из настроек админки или кода.

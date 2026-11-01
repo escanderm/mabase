@@ -644,7 +644,7 @@ on('digest.daily', async ({ data, db, task }) => {
 | Способ | Что нужно |
 |---|---|
 | Email и пароль | ничего; пароль хранится как argon2id |
-| Телефон | ничего: код выдаёт authphone.su (бот в Telegram или MAX, без SMS). Аккаунт создаётся без имени - после входа клиент спрашивает обязательные поля профиля |
+| Телефон | ничего: код выдаёт authphone.su (бот в Telegram или MAX, без SMS). Ссылки на ботов сервер отдаёт в `/api/auth/providers` (`authphone: { telegram, max }`), свои можно задать в `auth.authphone.bots` (пустая строка - скрыть кнопку). Аккаунт создаётся без имени - после входа клиент спрашивает обязательные поля профиля |
 | Google, GitHub | Client ID и Client Secret из консоли провайдера; адрес возврата `<сервер>/api/auth/oauth/<google или github>/callback`; адрес приложения |
 | Яндекс | Client ID и Client Secret из [oauth.yandex.ru](https://oauth.yandex.ru/); Redirect URI `<сервер>/api/auth/oauth/yandex/callback`. Новым приложениям Яндекс может потребовать подтвердить личность через Госуслуги |
 | VK ID | Client ID из [id.vk.com](https://id.vk.com/about/business/go/) (платформа Web), Redirect URI `<сервер>/api/auth/oauth/vk/callback`; для публичного приложения секрет не нужен, для конфиденциального - service token (поле Client Secret) |
