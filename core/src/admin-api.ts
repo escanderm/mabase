@@ -386,7 +386,7 @@ export function createAdminApi(o: AdminApiOptions): (r: Req) => Promise<Response
   function settingsView(origin: string) {
     return {
       ...o.settings.view(),
-      callbacks: { google: `${origin}/api/auth/oauth/google/callback`, github: `${origin}/api/auth/oauth/github/callback` },
+      callbacks: { google: `${origin}/api/auth/oauth/google/callback`, github: `${origin}/api/auth/oauth/github/callback`, yandex: `${origin}/api/auth/oauth/yandex/callback`, vk: `${origin}/api/auth/oauth/vk/callback` },
       db: { systemFields: SYSTEM_FIELDS_INFO, limits: o.access.limits, dir: db.stats.dir },
     }
   }

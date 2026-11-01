@@ -775,6 +775,10 @@ auth: {
   привязки.
 
 Провайдер - маленькое описание `{ authUrl, tokenUrl, scopes, profile() }`.
+Провайдеры: Google, GitHub, Яндекс, VK ID. Различия - флагами описания:
+`pkce`, `secret` (VK ID публичному приложению не нужен), `secretParam`
+(VK: `service_token`), `redirectUriInToken` (Яндекс не ждёт redirect_uri при
+обмене), `extraToken` (VK: `device_id` из возврата).
 Google и GitHub встроены. Яндекс, VK, Apple - тем же способом, когда
 понадобятся. [позже]
 

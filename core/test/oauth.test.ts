@@ -12,7 +12,7 @@ const APP = 'https://chat.example.test'
 const REDIRECT = 'https://api.chat.example.test/api/auth/oauth/cb'
 const b64sha256 = (s: string) => createHash('sha256').update(s).digest('base64url')
 
-type Grant = { provider: string; challenge: string; redirectUri: string; profile: any; emails?: any[] }
+type Grant = { provider: string; challenge: string; redirectUri: string; profile: any; emails?: any[]; deviceId?: string }
 
 // Поддельные Google и GitHub: выдают code, меняют его на токен (проверяя
 // секрет, redirect_uri и PKCE, как настоящие), отдают профиль по токену.
@@ -22,6 +22,37 @@ function fakeProviders() {
   const fail = { token: false, profile: false }
   let n = 0
   const fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    const auth = String((init.headers as Record<string, string>)?.Authorization ?? '')
+    // --- обмен кода на токен ---
+    if (url === OAUTH_PROVIDERS.yandex.tokenUrl) {
+      // Яндекс: PKCE и секрет, но redirect_uri при обмене не ждёт
+      const f = new URLSearchParams(String(init.body))
+      const g = issued.get(f.get('code')!)
+      issued.delete(f.get('code')!)
+      const ok = !fail.token && g && f.get('client_id') === 'id-yandex' && f.get('client_secret') === 'secret-yandex' && !f.has('redirect_uri') && b64sha256(f.get('code_verifier') ?? '') === g.challenge
+      if (!ok) return Response.json({ error: 'invalid_grant' }, { status: 400 })
+      const t = `tok-${++n}`
+      tokens.set(t, g!)
+      return Response.json({ access_token: t, token_type: 'bearer' })
+    }
+    if (url === OAUTH_PROVIDERS.vk.tokenUrl) {
+      // VK ID: PKCE + device_id, без client_secret у публичного приложения
+      const f = new URLSearchParams(String(init.body))
+      const g = issued.get(f.get('code')!)
+      issued.delete(f.get('code')!)
+      const ok =
+        !fail.token &&
+        g &&
+        f.get('client_id') === 'id-vk' &&
+        !f.has('client_secret') &&
+        f.get('device_id') === g.deviceId &&
+        f.get('redirect_uri') === g.redirectUri &&
+        b64sha256(f.get('code_verifier') ?? '') === g.challenge
+      if (!ok) return Response.json({ error: 'invalid_request' }, { status: 400 })
+      const t = `tok-${++n}`
+      tokens.set(t, g!)
+      return Response.json({ access_token: t, user_id: 777, token_type: 'bearer' })
+    }
     if (url === OAUTH_PROVIDERS.google.tokenUrl || url === OAUTH_PROVIDERS.github.tokenUrl) {
       const f = new URLSearchParams(String(init.body))
       const g = issued.get(f.get('code')!)
@@ -37,18 +68,28 @@ function fakeProviders() {
       tokens.set(t, g!)
       return Response.json({ access_token: t, token_type: 'bearer' })
     }
-    const g = tokens.get(String((init.headers as Record<string, string>).Authorization).slice('Bearer '.length))
+    // --- профиль по токену ---
+    const bearer = auth.startsWith('OAuth ') ? auth.slice('OAuth '.length) : auth.slice('Bearer '.length)
+    const vkForm = url === 'https://id.vk.ru/oauth2/user_info' ? new URLSearchParams(String(init.body)) : null
+    const g = tokens.get(vkForm ? (vkForm.get('access_token') ?? '') : bearer)
     if (!g || fail.profile) return new Response('no', { status: g ? 500 : 401 })
     if (url === 'https://openidconnect.googleapis.com/v1/userinfo' || url === 'https://api.github.com/user') return Response.json(g.profile)
     if (url === 'https://api.github.com/user/emails') return Response.json(g.emails ?? [])
+    if (url.startsWith('https://login.yandex.ru/info')) return Response.json(g.profile)
+    if (vkForm) {
+      if (vkForm.get('client_id') !== 'id-vk') return Response.json({ error: 'invalid_client' }, { status: 400 })
+      return Response.json({ user: g.profile })
+    }
     return new Response('?', { status: 404 })
   }
   // Пользователь у провайдера согласился: провайдер возвращает code и state.
   const consent = (authUrl: string, provider: string, profile: any, emails?: any[]) => {
     const u = new URL(authUrl)
     const code = `code-${++n}`
-    issued.set(code, { provider, challenge: u.searchParams.get('code_challenge')!, redirectUri: u.searchParams.get('redirect_uri')!, profile, emails })
-    return { code, state: u.searchParams.get('state')! }
+    const deviceId = provider === 'vk' ? 'dev-1' : undefined
+    issued.set(code, { provider, challenge: u.searchParams.get('code_challenge')!, redirectUri: u.searchParams.get('redirect_uri')!, profile, emails, deviceId })
+    // VK ID возвращает ещё device_id - он нужен при обмене кода
+    return { code, state: u.searchParams.get('state')!, ...(deviceId && { device_id: deviceId }) }
   }
   return { fetch, consent, fail }
 }
@@ -71,8 +112,8 @@ async function setup(opts: Partial<AuthOptions> = {}) {
   const login = async (provider: string, profile: any, o: { emails?: any[]; returnTo?: string; user?: any } = {}) => {
     const verifier = randomBytes(32).toString('base64url')
     const { url } = auth.oauthStart(provider, { redirectUri: REDIRECT, challenge: b64sha256(verifier), returnTo: o.returnTo, user: o.user })
-    const { code, state } = fp.consent(url, provider, profile, o.emails)
-    const { redirect } = await auth.oauthCallback(provider, { code, state })
+    const q = fp.consent(url, provider, profile, o.emails)
+    const { redirect } = await auth.oauthCallback(provider, q)
     const h = new URLSearchParams(new URL(redirect).hash.slice(1))
     if (h.get('mb_oauth_error')) return { error: h.get('mb_oauth_error')!, redirect }
     return { session: await auth.oauthExchange({ code: h.get('mb_oauth'), verifier }), redirect, code: h.get('mb_oauth')!, verifier }
@@ -225,6 +266,39 @@ describe('OAuth', () => {
     await db.close()
   })
 
+  test('79. Яндекс: PKCE, обмен без redirect_uri, профиль из login.yandex.ru', async () => {
+    const { db, login, auth } = await setup({ providers: ['yandex'], oauth: { yandex: { clientId: 'id-yandex', clientSecret: 'secret-yandex' } } })
+    const verifier = randomBytes(32).toString('base64url')
+    const { url } = auth.oauthStart('yandex', { redirectUri: REDIRECT, challenge: b64sha256(verifier) })
+    const u = new URL(url)
+    expect(u.origin + u.pathname).toBe(OAUTH_PROVIDERS.yandex.authUrl)
+    expect(Object.fromEntries(u.searchParams)).toMatchObject({ client_id: 'id-yandex', redirect_uri: REDIRECT, scope: 'login:email login:info', code_challenge_method: 'S256' })
+    const r = await login('yandex', { id: 1000034426, default_email: 'ivan@yandex.test', real_name: 'Иван', is_avatar_empty: false, default_avatar_id: '131652443' })
+    expect(r.session!.user).toMatchObject({ email: 'ivan@yandex.test', verified: true, name: 'Иван' })
+    // avatar из профиля можно сохранить своим полем (oauthFields) - как у GitHub в тесте 74
+    expect(r.session!.user.avatar).toBeUndefined()
+    expect(await db.c._externalAuths!.count({ provider: 'yandex', providerId: '1000034426' })).toBe(1)
+    await db.close()
+  })
+
+  test('80. VK ID: PKCE и device_id в обмене, без секрета, профиль из user_info', async () => {
+    const { db, auth, fp, login } = await setup({ providers: ['vk'], oauth: { vk: { clientId: 'id-vk', clientSecret: '' } } })
+    const verifier = randomBytes(32).toString('base64url')
+    const { url } = auth.oauthStart('vk', { redirectUri: REDIRECT, challenge: b64sha256(verifier) })
+    const u = new URL(url)
+    expect(u.origin + u.pathname).toBe(OAUTH_PROVIDERS.vk.authUrl)
+    expect(u.searchParams.get('scope')).toBe('email')
+    const r = await login('vk', { user_id: 555, first_name: 'Пётр', last_name: 'ВК', email: 'petr@vk.test', avatar: 'https://pic/vk' })
+    expect(r.session!.user).toMatchObject({ email: 'petr@vk.test', verified: true, name: 'Пётр ВК' })
+    expect(await db.c._externalAuths!.count({ provider: 'vk', providerId: '555' })).toBe(1)
+
+    // без device_id обмен не проходит: провайдер отвечает ошибкой, браузер - с mb_oauth_error
+    const q = fp.consent(auth.oauthStart('vk', { redirectUri: REDIRECT, challenge: b64sha256(verifier) }).url, 'vk', { user_id: 556 })
+    const { redirect } = await auth.oauthCallback('vk', { code: q.code, state: q.state })
+    expect(redirect).toBe(`${APP}/#mb_oauth_error=provider_error`)
+    await db.close()
+  })
+
   test('78. отказ, сбой провайдера, чужой провайдер в колбэке, неверные параметры и конфиг', async () => {
     const { db, auth, fp, login, errors, reasons } = await setup()
     const ch = b64sha256('v')
@@ -264,7 +338,7 @@ describe('OAuth', () => {
     expect(() => pwOnly.oauthStart('google', { redirectUri: REDIRECT, challenge: ch })).toThrow(expect.objectContaining({ code: 'not_found' }))
     expect(() => new Auth(acc, { secret: SECRET, appUrl: APP, providers: ['google'] })).toThrow(/Client Secret/)
     expect(() => new Auth(acc, { secret: SECRET, providers: ['google'], oauth: { google: { clientId: 'i', clientSecret: 's' } } })).toThrow(/appUrl/)
-    expect(() => new Auth(acc, { secret: SECRET, providers: ['vk' as any] })).toThrow(/неизвестный/)
+    expect(() => new Auth(acc, { secret: SECRET, providers: ['apple' as any] })).toThrow(/неизвестный/)
     await db2.close()
   })
 })

@@ -28,6 +28,8 @@ export type StoredSettings = {
     phone?: boolean
     google?: { enabled?: boolean; clientId?: string; clientSecret?: string }
     github?: { enabled?: boolean; clientId?: string; clientSecret?: string }
+    yandex?: { enabled?: boolean; clientId?: string; clientSecret?: string }
+    vk?: { enabled?: boolean; clientId?: string; clientSecret?: string }
     appUrl?: string
   }
   mail?: {
@@ -61,7 +63,7 @@ export type SettingsOptions = {
   liveStorage?: () => S3Options | null
 }
 
-const OAUTH = ['google', 'github'] as const
+const OAUTH = ['google', 'github', 'yandex', 'vk'] as const
 const bad = (m: string) => new ActionError('bad_request', m)
 
 export class Settings {

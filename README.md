@@ -646,6 +646,8 @@ on('digest.daily', async ({ data, db, task }) => {
 | Email и пароль | ничего; пароль хранится как argon2id |
 | Телефон | ничего: код подтверждения выдаёт сервис authphone.su, без SMS |
 | Google, GitHub | Client ID и Client Secret из консоли провайдера; адрес возврата `<сервер>/api/auth/oauth/<google или github>/callback`; адрес приложения |
+| Яндекс | Client ID и Client Secret из [oauth.yandex.ru](https://oauth.yandex.ru/); Redirect URI `<сервер>/api/auth/oauth/yandex/callback`. Новым приложениям Яндекс может потребовать подтвердить личность через Госуслуги |
+| VK ID | Client ID из [id.vk.com](https://id.vk.com/about/business/go/) (платформа Web), Redirect URI `<сервер>/api/auth/oauth/vk/callback`; для публичного приложения секрет не нужен, для конфиденциального - service token (поле Client Secret) |
 
 Что видно снаружи: занятый email сообщается и при регистрации, и при смене
 email (иначе человек не поймёт, почему письмо не пришло). Сброс пароля при
@@ -660,6 +662,8 @@ email (иначе человек не поймёт, почему письмо н
    `<адрес приложения>/api/auth/oauth/google/callback` (для локальной
    проверки Google разрешает `http://127.0.0.1:8090/...`). Ключи - в
    `auth.oauth.google` или `MABASE_GOOGLE_ID/SECRET`.
+   Яндекс и VK ID - так же: `<адрес приложения>/api/auth/oauth/yandex/callback`
+   и `.../vk/callback`.
 3. GitHub: OAuth App, callback - `<адрес приложения>/api/auth/oauth/github/callback`;
    ключи - `auth.oauth.github` или `MABASE_GITHUB_ID/SECRET`.
 4. Включите способы в `/_/` -> Настройки -> Вход и откройте страницу входа

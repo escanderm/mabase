@@ -1712,7 +1712,7 @@ type Settings = {
   auth: any
   mail: any
   storage?: { s3?: Record<string, any> }
-  callbacks: { google: string; github: string }
+  callbacks: Record<string, string>
   db: { systemFields: { name: string; type: string; about: string }[]; limits: Record<string, number>; dir: string }
 }
 
@@ -1746,7 +1746,7 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
   const minLen = h('input', { class: 'input', type: 'number', min: 6, max: 128, value: String(A.minPasswordLength ?? 8) }) as HTMLInputElement
   const [phRow, phone] = check('Телефон', A.phone ?? false, 'вход по коду через сервис authphone.su, без SMS')
   const appUrl = h('input', { class: 'input mono', placeholder: 'https://my.app', value: A.appUrl ?? '' }) as HTMLInputElement
-  const oauthBlock = (p: 'google' | 'github', title: string) => {
+  const oauthBlock = (p: 'google' | 'github' | 'yandex' | 'vk', title: string) => {
     const c = A[p] ?? {}
     const [row, on] = check(title, !!c.enabled, 'вход через аккаунт ' + title)
     const id = h('input', { class: 'input mono', value: c.clientId ?? '', placeholder: 'Client ID' }) as HTMLInputElement
@@ -1764,6 +1764,8 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
   }
   const google = oauthBlock('google', 'Google')
   const github = oauthBlock('github', 'GitHub')
+  const yandex = oauthBlock('yandex', 'Яндекс')
+  const vk = oauthBlock('vk', 'VK ID')
   const authErr = h('div', { class: 'error-text' })
   const authForm = h(
     'div',
@@ -1774,7 +1776,9 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
     phRow,
     google.el,
     github.el,
-    field('Адрес приложения', appUrl, 'сайт вашего приложения: сюда ведут ссылки из писем и возврат после входа через Google и GitHub. Обязателен для них и для SMTP'),
+    yandex.el,
+    vk.el,
+    field('Адрес приложения', appUrl, 'сайт вашего приложения: сюда ведут ссылки из писем и возврат после входа через Google, GitHub, Яндекс и VK ID. Обязателен для них и для SMTP'),
     authErr,
   )
   if (ro) for (const el of authForm.querySelectorAll('input')) (el as HTMLInputElement).disabled = true
@@ -1878,6 +1882,8 @@ async function settingsPage(main: HTMLElement, first: boolean): Promise<void> {
         phone: phone.checked,
         google: google.get(),
         github: github.get(),
+        yandex: yandex.get(),
+        vk: vk.get(),
         appUrl: appUrl.value.trim(),
       }
     if (!mro) body.mail = { mode: mode.value, from: from.value, appName: appName.value, smtp: { host: host.value, port: port.value ? Number(port.value) : undefined, secure: tls.checked, user: user.value, pass: pass.value } }

@@ -15,7 +15,7 @@ import { clientErrors, type Access } from './access'
 import { parseDuration, type CollectionDef, type Db, type Doc, type Hooks, type TxApi, type User } from './db'
 import { ActionError, DefinitionError } from './errors'
 import { Mailer, type LetterKind } from './mail'
-import { exchangeCode, OAUTH_PROVIDERS, type OAuthClient, type OAuthProfile, type OAuthProviderName } from './oauth'
+import { exchangeCode, OAUTH_PROVIDERS, type OAuthClient, type OAuthProfile, type OAuthProvider, type OAuthProviderName } from './oauth'
 import type { Schema } from './schema'
 
 export const USERS = 'users'
@@ -319,8 +319,13 @@ export class Auth {
       if (p === 'password' || p === 'authphone') continue
       if (!(p in OAUTH_PROVIDERS)) throw new TypeError(`auth.providers: неизвестный способ входа ${p}`)
       const c = o.oauth?.[p as OAuthProviderName]
-      const title = p === 'github' ? 'GitHub' : p[0]!.toUpperCase() + p.slice(1)
-      if (!c?.clientId || !c?.clientSecret) throw new TypeError(`${title}: нужны Client ID и Client Secret (auth.oauth.${p})`)
+      const provider = OAUTH_PROVIDERS[p as OAuthProviderName] as OAuthProvider
+      const title = { github: 'GitHub', vk: 'VK ID', yandex: 'Яндекс' }[p as 'github' | 'vk' | 'yandex'] ?? p[0]!.toUpperCase() + p.slice(1)
+      // Публичному приложению VK ID секрет не нужен; конфиденциальному - service_token
+      const needSecret = provider.secret !== false
+      if (!c?.clientId && (!needSecret || !c?.clientSecret)) throw new TypeError(`${title}: нужны Client ID и Client Secret (auth.oauth.${p})`)
+      if (!c?.clientId) throw new TypeError(`${title}: нужен Client ID (auth.oauth.${p})`)
+      if (needSecret && !c?.clientSecret) throw new TypeError(`${title}: нужен Client Secret (auth.oauth.${p})`)
       if (!o.appUrl) throw new TypeError(`Нужен адрес приложения (auth.appUrl): туда вернётся пользователь после входа через ${title}`)
     }
     // В режиме разработки ссылка без адреса - путь; иначе ссылка из письма никуда не ведёт.
@@ -623,7 +628,7 @@ export class Auth {
   }
 
   // Ответ - куда отправить браузер: appUrl + returnTo + #mb_oauth=код или #mb_oauth_error=причина.
-  async oauthCallback(provider: string, q: { code?: unknown; state?: unknown; error?: unknown }): Promise<{ redirect: string }> {
+  async oauthCallback(provider: string, q: Record<string, unknown>): Promise<{ redirect: string }> {
     const st = typeof q.state === 'string' ? this.oauthStates.get(q.state) : undefined
     if (st) this.oauthStates.delete(q.state as string) // state одноразовый
     const back = (hash: string) => ({ redirect: `${this.appUrl}${st?.returnTo ?? '/'}#${hash}` })
@@ -634,8 +639,11 @@ export class Auth {
       let profile: OAuthProfile
       try {
         const signal = AbortSignal.timeout(10_000)
-        const token = await exchangeCode(d, this.oauth[st.provider]!, { code: q.code, redirectUri: st.redirectUri, verifier: st.verifier }, this.fetch, signal)
-        profile = await d.profile(token, this.fetch, signal)
+        // Прочие параметры возврата (VK ID: device_id) уходят в обмен кода
+        const extra: Record<string, string> = {}
+        for (const [k, v] of Object.entries(q)) if (k !== 'code' && k !== 'state' && k !== 'error' && typeof v === 'string') extra[k] = v
+        const token = await exchangeCode(d, this.oauth[st.provider]!, { code: q.code as string, redirectUri: st.redirectUri, verifier: st.verifier, extra }, this.fetch, signal)
+        profile = await d.profile(token.accessToken, this.fetch, signal, { clientId: this.oauth[st.provider]!.clientId, body: token.body })
       } catch (err) {
         this.onError(err, `oauth ${st.provider}`)
         throw new OAuthFail('provider_error')

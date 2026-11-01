@@ -1,5 +1,21 @@
 # Изменения
 
+## 0.2.17
+
+- Вход через **Яндекс ID** и **VK ID**: `auth.providers` / настройки админки,
+  кнопки в примере чата. Яндекс - обычный code-flow с PKCE, профиль через
+  `login.yandex.ru/info` (имя, подтверждённый email, аватар); при обмене кода
+  redirect_uri не передаётся, как требует Яндекс.
+- VK ID: PKCE и `device_id` из возврата, обмен на `id.vk.ru/oauth2/auth`,
+  профиль - POST `id.vk.ru/oauth2/user_info`. Публичному приложению секрет не
+  нужен; если задан - уходит как `service_token` для конфиденциального.
+- `OAuthProvider` расширен без ломки: `pkce`, `secret`, `secretParam`,
+  `redirectUriInToken`, `extraToken`; профиль получает `clientId` и тело
+  ответа токена (VK отдаёт там `user_id`).
+- Тесты 79-80: Яндекс (PKCE, обмен без redirect_uri, профиль) и VK ID
+  (device_id обязателен, без секрета, профиль user_info); 213 - включение
+  через настройки, VK без секрета допустим.
+
 ## 0.2.16
 
 - `GET /api/auth/providers` - публичный список включённых способов входа

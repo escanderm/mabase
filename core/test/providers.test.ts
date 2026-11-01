@@ -20,6 +20,29 @@ describe('способы входа', () => {
     expect(createHash('sha256').update('v'.repeat(43)).digest('base64url')).toHaveLength(43)
   })
 
+  test('213. Яндекс и VK ID включаются в настройках; VK без секрета допустим, Яндекс без секрета - нет', async () => {
+    const s = await startServer({ dataDir: tmpDir('providers2'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false } })
+    try {
+      const setup = await call(s.url, 'POST', '/api/_/setup', undefined, { token: s.setupUrl!.split('/setup/')[1]!, email: 'admin@example.test', password: 'admin-pass-12345' })
+      const token = setup.json.token
+      const base = { password: true, signup: true, minPasswordLength: 8, appUrl: 'http://127.0.0.1:8090' }
+      // Яндекс без секрета - отказ с понятным текстом
+      expect((await call(s.url, 'PUT', '/api/_/settings', token, { auth: { ...base, yandex: { enabled: true, clientId: 'yandex-id', clientSecret: '' } } })).status).toBe(400)
+      // VK ID публичному приложению секрет не нужен
+      const ok = await call(s.url, 'PUT', '/api/_/settings', token, {
+        auth: { ...base, yandex: { enabled: true, clientId: 'yandex-id', clientSecret: 'yandex-secret' }, vk: { enabled: true, clientId: 'vk-id', clientSecret: '' } },
+      })
+      expect(ok.status).toBe(200)
+      expect((await call(s.url, 'GET', '/api/auth/providers')).json.providers).toEqual(['password', 'yandex', 'vk'])
+      expect(ok.json.fixed.storage).toBe(false)
+      // вернуть как было
+      expect((await call(s.url, 'PUT', '/api/_/settings', token, { auth: { ...base, yandex: { enabled: false, clientId: 'yandex-id', clientSecret: 'yandex-secret' }, vk: { enabled: false, clientId: 'vk-id', clientSecret: '' } } })).status).toBe(200)
+      expect((await call(s.url, 'GET', '/api/auth/providers')).json.providers).toEqual(['password'])
+    } finally {
+      await s.stop()
+    }
+  }, 30_000)
+
   test('212. /api/auth/providers: пароль по умолчанию, Google после включения, отказ провайдера', async () => {
     const s = await startServer({ dataDir: tmpDir('providers'), port: 0, hostname: '127.0.0.1', env: {}, onWarning: () => {}, db: { fsync: false } })
     try {
