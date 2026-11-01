@@ -75,6 +75,16 @@ main { display: flex; flex-direction: column; min-height: 0; }
   aside { max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); }
 }
 
+a.button {
+  display: inline-block;
+  text-decoration: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  background: var(--accent);
+  color: #fff;
+}
+a.button.secondary { background: var(--line); color: var(--text); }
+
 .phone { display: grid; gap: 8px; }
 .phone summary { cursor: pointer; color: var(--accent); }
 

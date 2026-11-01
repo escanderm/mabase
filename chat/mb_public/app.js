@@ -464,9 +464,8 @@ $('delete-room').addEventListener(
 
 const OAUTH_NAMES = { google: 'Google', github: 'GitHub', yandex: 'Яндекс', vk: 'ВКонтакте' }
 
-// Возврат с #mb_oauth=<код>: меняем код на токены; иначе рисуем кнопки того,
-// что включено в настройках. Ошибку провайдера показываем текстом.
-async function initOAuth() {
+// Что включено: кнопки OAuth и переходы в ботов AuthPhone (код приходит туда).
+async function initLogin() {
   try {
     const user = await mb.auth.completeOAuth()
     if (user) return afterLogin()
@@ -474,16 +473,28 @@ async function initOAuth() {
     $('login-error').textContent = err instanceof MabaseError ? err.message : 'Вход не удался'
   }
   try {
-    const { providers } = await mb.auth.providers()
+    const { providers, authphone } = await mb.auth.providers()
     const list = providers.filter((p) => OAUTH_NAMES[p])
-    if (!list.length) return
-    const box = $('oauth')
-    box.hidden = false
-    box.replaceChildren(
-      ...list.map((p) =>
-        h('button', { type: 'button', class: 'secondary', onclick: safe(async () => { await mb.auth.oauth(p) }) }, `Войти через ${OAUTH_NAMES[p]}`),
-      ),
-    )
+    if (list.length) {
+      const box = $('oauth')
+      box.hidden = false
+      box.replaceChildren(
+        ...list.map((p) =>
+          h('button', { type: 'button', class: 'secondary', onclick: safe(async () => { await mb.auth.oauth(p) }) }, `Войти через ${OAUTH_NAMES[p]}`),
+        ),
+      )
+    }
+    // Телефон включён - показываем форму и ссылки на ботов: без них человек
+    // не знает, где взять код. Ссылки приходят с сервера (auth.authphone.bots).
+    if (providers.includes('authphone')) {
+      $('phone-box').hidden = false
+      const bots = $('phone-bots')
+      const link = (text, href) => h('a', { class: 'button secondary', href, target: '_blank', rel: 'noopener' }, text)
+      bots.replaceChildren(
+        ...(authphone?.telegram ? [link('Бот в Telegram', authphone.telegram)] : []),
+        ...(authphone?.max ? [link('Бот в MAX', authphone.max)] : []),
+      )
+    }
   } catch {
     /* старый сервер без /api/auth/providers - просто без кнопок */
   }
@@ -495,5 +506,5 @@ const user = await mb.auth.restore().catch(() => null)
 if (user) start()
 else {
   $('login').hidden = false
-  await initOAuth()
+  await initLogin()
 }
