@@ -357,7 +357,7 @@ $('delete-room').addEventListener(
 
 // ---------- вход через Google/GitHub ----------
 
-const OAUTH_NAMES = { google: 'Google', github: 'GitHub' }
+const OAUTH_NAMES = { google: 'Google', github: 'GitHub', yandex: 'Яндекс', vk: 'ВКонтакте' }
 
 // Возврат с #mb_oauth=<код>: меняем код на токены; иначе рисуем кнопки того,
 // что включено в настройках. Ошибку провайдера показываем текстом.
