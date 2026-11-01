@@ -31,7 +31,7 @@ describe('способы входа', () => {
       expect((await call(s.url, 'PUT', '/api/_/settings', token, { auth })).status).toBe(200)
       const p = (await call(s.url, 'GET', '/api/auth/providers')).json
       expect(p.providers).toContain('authphone')
-      expect(p.authphone).toEqual({ telegram: 'https://t.me/myauth_superbot', max: 'https://max.ru/id773001707708_1_bot?start=start' })
+      expect(p.authphone).toEqual({ telegram: 'https://t.me/myauth_superbot?start=start', max: 'https://max.ru/id773001707708_1_bot?start=start' })
     } finally {
       await s.stop()
     }

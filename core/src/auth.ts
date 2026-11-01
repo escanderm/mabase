@@ -93,7 +93,9 @@ const PASSWORD_BOUND = { $in: ['session', 'reset', 'email', 'verify'] }
 
 // Куда идти за кодом: боты authphone.su. Ссылки отдаются клиенту, чтобы
 // пример не хардкодил их, а свой сервис мог подставить свои.
-const AUTHPHONE_BOTS = { telegram: 'https://t.me/myauth_superbot', max: 'https://max.ru/id773001707708_1_bot?start=start' }
+// ?start=start нужен обоим: бот по команде /start start понимает, что пришёл
+// человек с сайта, и присылает инструкцию поделиться номером.
+const AUTHPHONE_BOTS = { telegram: 'https://t.me/myauth_superbot?start=start', max: 'https://max.ru/id773001707708_1_bot?start=start' }
 
 const OAUTH_STATE_MS = 10 * 60_000 // пользователь у провайдера
 const OAUTH_CODE_MS = 60_000 // одноразовый код от колбэка до SDK
