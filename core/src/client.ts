@@ -322,6 +322,9 @@ class AuthClient {
 
   unlink = (provider: string) => this.mb.request<void>('DELETE', `/api/auth/oauth/${encodeURIComponent(provider)}`)
 
+  // Что включено: какие кнопки входа рисовать.
+  providers = () => this.mb.request<{ providers: string[]; signup: boolean }>('GET', '/api/auth/providers')
+
   // Токен истекает - обновить до запроса.
   /** @internal */ async fresh(): Promise<void> {
     if (this.session && this.session.accessExpiresAt - Date.now() < 5_000) await this.refresh()

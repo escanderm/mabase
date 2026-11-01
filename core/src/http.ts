@@ -323,6 +323,7 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
   ): Promise<Response> {
     const info = { ip: clientIp(req, meta) }
     const m = req.method
+    if (sub === 'providers' && req.method === 'GET') return json(auth.listProviders())
     const oauth = /^oauth\/([^/]+)(?:\/(start|callback))?$/.exec(sub)
     if (oauth && sub !== 'oauth/exchange') {
       const [, provider, step] = oauth as unknown as [string, string, string | undefined]

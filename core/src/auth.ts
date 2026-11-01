@@ -299,6 +299,11 @@ export class Auth {
 
   // Способы входа, регистрация, OAuth, адрес приложения. Из конфига при
   // старте или из настроек админки на ходу. Ошибка - ничего не меняется.
+  // Что включено сейчас: фронтенду нужно знать, какие кнопки входа рисовать.
+  listProviders(): { providers: AuthProvider[]; signup: boolean } {
+    return { providers: [...this.providers], signup: this.signup }
+  }
+
   configure(o: AuthSettings): void {
     const c = Auth.check(o, this.mail.mode)
     this.providers = c.providers
