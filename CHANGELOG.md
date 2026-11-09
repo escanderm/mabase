@@ -1,5 +1,20 @@
 # Изменения
 
+## Не выпущено
+
+- HTTP API: `DELETE /api/c/:коллекция?filter=<JSON>&limit=100` - массовое удаление
+  пачкой (`{ deleted }`). Каждая запись проходит правило `delete`; без `filter` -
+  400; если под фильтр попадает больше `limit` (по умолчанию 100) - 400, а не
+  частичное удаление. Ответ на issue #1 - вместе с разделом README «Удаление
+  связанных данных» про `onDelete: 'cascade'`, который закрывает тот же кейс без
+  новых эндпоинтов.
+- README: «Формы ответов» (`Session`, `{ items, tx }`, `count`, единая ошибка) и
+  примеры curl на каждый эндпоинт - issue #3.
+- README: «Headless: Docker и systemd без мастера» - офлайн-порядок
+  `superuser upsert` → `seed` → `serve`, Dockerfile на debian-slim (glibc) и
+  предупреждение, что `MABASE_*` зарезервировано - issue #2.
+- Тест 87 в `http.test.ts`: правила, `limit`, отказ без `filter`, пустой фильтр.
+
 ## 0.2.22
 
 - Починена CI: в чистом клоне `src/generated/*` нет (они в `.gitignore`), а

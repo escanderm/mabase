@@ -278,6 +278,16 @@ export function createHandler(opts: HttpOptions): (req: Request, meta?: RequestM
           const { doc, files } = await parseBody()
           return json(await coll.insert(doc, { files }))
         }
+        if (method === 'DELETE') {
+          // Массовое удаление: только явным фильтром, чтобы ?filter= уронил случайную чистку.
+          const params = url.searchParams
+          if (!params.has('filter')) throw bad('DELETE коллекции требует filter; одна запись - /api/c/:коллекция/:id')
+          for (const k of params.keys()) if (k !== 'filter' && k !== 'limit') throw bad(`неизвестный параметр ${k}`)
+          const filter = parseJsonParam(params.get('filter'), 'filter')
+          const limitRaw = params.get('limit')
+          const limit = limitRaw === null ? undefined : Number(limitRaw)
+          return json(await coll.removeMany(filter, { limit }))
+        }
       }
       if (parts.length === 3) {
         const id = parts[2]!

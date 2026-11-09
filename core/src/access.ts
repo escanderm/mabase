@@ -554,4 +554,29 @@ export class ClientCollection {
       }, { user: this.s.user, origin: 'api' })
     })
   }
+
+  // Массовое удаление по фильтру. Правила те же, что у одиночного remove:
+  // каждая запись проходит правило delete, иначе пачка была бы дырой в доступе.
+  // limit ограничивает пачку: больше - ошибка, а не молчаливое частичное удаление.
+  removeMany(filter: unknown, opts: { limit?: number } = {}): Promise<{ deleted: number }> {
+    return clientErrors(async () => {
+      this.s.checkFilter(this.name, filter)
+      if (!filter || typeof filter !== 'object' || Array.isArray(filter)) throw bad('filter - объект; удалить всё - filter: {}')
+      const { defaultLimit, maxLimit } = this.s.access.limits
+      const limit = opts.limit ?? defaultLimit
+      if (!Number.isInteger(limit) || limit < 1) throw bad('limit: целое число больше 0')
+      if (limit > maxLimit) throw bad(`limit больше ${maxLimit}`)
+      const db = this.s.access.db
+      return db.transaction(async (tx) => {
+        const view = await this.s.ruleFilter(this.name, 'view', tx.c)
+        const docs = await tx.c[this.name]!.find(and(view, filter), { limit: limit + 1 })
+        if (docs.length > limit) {
+          throw new ActionError('bad_request', `под фильтр попадает больше ${limit} записей: уточните filter или увеличьте limit`)
+        }
+        for (const doc of docs) await this.s.check(this.name, 'delete', { before: doc, db: tx.c })
+        for (const doc of docs) await tx.c[this.name]!.remove(doc._id)
+        return { deleted: docs.length }
+      }, { user: this.s.user, origin: 'api' })
+    })
+  }
 }

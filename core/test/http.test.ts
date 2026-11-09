@@ -120,6 +120,37 @@ describe('HTTP', () => {
     await db.close()
   })
 
+  test('87. массовое удаление по фильтру: правила, limit, без filter - 400', async () => {
+    const { db, call } = await setup()
+    const a = (await call('POST', '/api/auth/register', { body: alice })).body
+    const b = (await call('POST', '/api/auth/register', { body: bob })).body
+    for (const text of ['1', '2', '3']) expect((await call('POST', '/api/c/notes', { token: a.accessToken, body: { text } })).status).toBe(200)
+    await call('POST', '/api/c/notes', { token: b.accessToken, body: { text: 'чужое' } })
+
+    // без filter - 400: массовая чистка не должна случаться от опечатки
+    expect((await call('DELETE', '/api/c/notes', { token: a.accessToken })).status).toBe(400)
+    // под фильтр попадает больше limit - 400, а не частичное удаление
+    const tooMany = await call('DELETE', '/api/c/notes' + q({ filter: { text: { $in: ['1', '2', '3'] } }, limit: '2' }), { token: a.accessToken })
+    expect(tooMany.status).toBe(400)
+    expect((await call('GET', '/api/c/notes' + q({ count: '1' }), { token: a.accessToken })).body).toEqual({ count: 3 })
+
+    const del = await call('DELETE', '/api/c/notes' + q({ filter: { text: { $in: ['1', '2'] } } }), { token: a.accessToken })
+    expect(del.status).toBe(200)
+    expect(del.body).toEqual({ deleted: 2 })
+    expect((await call('GET', '/api/c/notes' + q({ count: '1' }), { token: a.accessToken })).body).toEqual({ count: 1 })
+    // чужое правило не пускает: у Боба своя запись цела
+    expect((await call('GET', '/api/c/notes' + q({ count: '1' }), { token: b.accessToken })).body).toEqual({ count: 1 })
+
+    // явный пустой фильтр удаляет всё видимое: 1 своя запись, чужая не тронута
+    expect((await call('DELETE', '/api/c/notes' + q({ filter: {} }), { token: a.accessToken })).body).toEqual({ deleted: 1 })
+    expect((await call('GET', '/api/c/notes' + q({ count: '1' }), { token: b.accessToken })).body).toEqual({ count: 1 })
+
+    // гость и неизвестный параметр
+    expect((await call('DELETE', '/api/c/notes' + q({ filter: {} }))).status).toBe(401)
+    expect((await call('DELETE', '/api/c/notes' + q({ filter: {}, sort: { text: 1 } }), { token: a.accessToken })).status).toBe(400)
+    await db.close()
+  })
+
   test('80. ошибки: неверный токен - 401; тело, тип, размер; 404/405; 500 без подробностей; таймаут - 503', async () => {
     const { db, call, errors } = await setup({ http: { maxBodyBytes: 1000 }, txTimeoutMs: 100 })
     const a = (await call('POST', '/api/auth/register', { body: alice })).body

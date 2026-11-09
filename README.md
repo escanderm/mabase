@@ -406,6 +406,25 @@ img.src = mb.fileUrl(doc.avatar)
 каждого документа есть кнопка "Ссылки" - кто на него ссылается. Поля-связи
 индексируются автоматически.
 
+### Удаление связанных данных
+
+Если у записи есть «дети» - ответы у опроса, сообщения у комнаты, - удалять их вручную не нужно:
+объявите связь и `onDelete`, и сервер сделает это в той же транзакции.
+
+```ts
+const responses = defineCollection('responses', {
+  relations: { surveyId: { to: 'surveys', onDelete: 'cascade' } },
+})
+// удалили опрос - ответы ушли вместе с ним, одной транзакцией
+```
+
+Клиенту из REST для этого достаточно `DELETE /api/c/surveys/:id` - никакого цикла
+«вычитал страницу, удалил по одному».
+
+Если связи нет, а удалить нужно пачкой - `DELETE /api/c/:коллекция?filter=<JSON>`:
+каждая запись проходит правило `delete`, `limit` по умолчанию 100 (и не больше лимита
+клиента), а если под фильтр попадает больше - сервер отвечает 400, а не удаляет часть.
+
 ### Индексы
 
 Индекс по полю ускоряет равенство, `$in`, диапазоны и сортировку по этому
@@ -771,6 +790,7 @@ await mb.action('invite', { roomId, email })        // вход действия
 | `GET /api/c/:коллекция` | `?filter=<JSON>&sort=<JSON>&limit=50&fields=a,b&expand=a,b` -> `{ items, tx }`; `?count=1` -> `{ count }` |
 | `POST /api/c/:коллекция` | создать документ |
 | `GET`, `PATCH`, `DELETE /api/c/:коллекция/:id` | прочитать, изменить операторами (`{ $set: ... }`), удалить |
+| `DELETE /api/c/:коллекция?filter=<JSON>&limit=100` | удалить пачкой по фильтру -> `{ deleted }`; без `filter` - 400 |
 | `POST /api/actions/:имя` | вызвать действие, тело - `input` |
 | `/api/auth/*` | `register`, `login`, `phone`, `refresh`, `logout`, `me`, `password`, `verify-email/*`, `reset-password/*`, `change-email/*`, `oauth/*` |
 | `GET /api/client.js` | SDK для браузера |
@@ -781,6 +801,66 @@ await mb.action('invite', { roomId, email })        // вход действия
 - Токен - в заголовке `Authorization: Bearer <access>`.
 - Ошибка - `{ code, message, details? }` с HTTP-статусом:
   400, 401, 403, 404, 409, 413, 415, 429; 503, если сервер перегружен.
+
+### Формы ответов
+
+**Вход.** `POST /api/auth/login`, `phone`, `refresh`, `oauth/exchange` отвечают одинаково - `Session`:
+
+```json
+{
+  "user": { "_id": "01J...", "email": "me@my.app", "roles": ["admin"], "_createdAt": 1793650000000 },
+  "accessToken": "eyJhbGciOi...",
+  "accessExpiresAt": 1793650900000,
+  "refreshToken": "01J.....nOIq1..."
+}
+```
+
+`user` - таким его видит сам пользователь: без `passwordHash` и служебных полей.
+
+**Список.** `GET /api/c/:коллекция` -> `{ items, tx }`:
+
+```json
+{ "items": [{ "_id": "01J...", "text": "привет", "_createdAt": 1793650000000, "_updatedAt": 1793650000000 }], "tx": 42 }
+```
+
+`tx` - номер транзакции, на котором прочитано: по нему realtime-клиент отбрасывает события,
+которые уже есть в ответе. `?count=1` -> `{ "count": 3 }`.
+
+**Удаление пачкой.** `DELETE /api/c/:коллекция?filter=<JSON>&limit=100` -> `{ "deleted": 2 }`.
+
+**Ошибка** - одна форма на все эндпоинты:
+
+```json
+{ "code": "bad_request", "message": "limit: целое число больше 0" }
+```
+
+`details` появляется, когда есть что уточнить (например, `field` при `conflict`).
+Коды и статусы: `bad_request` 400, `unauthorized` 401, `forbidden` 403, `not_found` 404,
+`conflict` 409, `too_large` 413, `unsupported_media_type` 415, `too_many_requests` 429,
+`unavailable` 503.
+
+### Примеры curl
+
+```bash
+BASE=http://127.0.0.1:8090
+
+# вход: access-токен в переменную
+TOKEN=$(curl -s -X POST $BASE/api/auth/login -H 'content-type: application/json' \
+  -d '{"email":"me@my.app","password":"..."}' | jq -r .accessToken)
+
+# список: filter и sort - JSON-строкой в query
+curl -s "$BASE/api/c/notes?filter=%7B%22status%22%3A%22new%22%7D&sort=%7B%22_id%22%3A-1%7D&limit=10" \
+  -H "authorization: Bearer $TOKEN"
+
+# одна запись, изменение, удаление
+curl -s "$BASE/api/c/notes/01J..." -H "authorization: Bearer $TOKEN"
+curl -s -X PATCH "$BASE/api/c/notes/01J..." -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"$set":{"status":"paid"}}'
+curl -s -X DELETE "$BASE/api/c/notes/01J..." -H "authorization: Bearer $TOKEN" -o /dev/null -w '%{http_code}\n'
+
+# пачка по фильтру -> {"deleted":N}; без filter сервер отвечает 400
+curl -s -X DELETE "$BASE/api/c/notes?filter=%7B%22status%22%3A%22old%22%7D" -H "authorization: Bearer $TOKEN"
+```
 
 ## Командная строка
 
@@ -825,6 +905,42 @@ WantedBy=multi-user.target
 При первом запуске под systemd ссылка настройки будет в журнале:
 `journalctl -u mabase`. Или заранее создайте администратора:
 `./mabase superuser upsert`.
+
+### Headless: Docker и systemd без мастера
+
+Интерактивный мастер в контейнере не нужен - всё делается командами, и они же
+становятся entrypoint:
+
+```sh
+./mabase superuser upsert "$ADMIN_EMAIL" "$ADMIN_PASSWORD"   # офлайн, сервер остановлен
+./mabase seed                                                # ваш seed.ts
+exec ./mabase serve --host 0.0.0.0
+```
+
+- `superuser upsert`, `seed` и `migrate` работают **офлайн**: открывают `mb_data` напрямую.
+  Поэтому сначала они, потом `serve`. Пока суперпользователя нет, `serve` печатает ссылку
+  мастера; после `upsert` мастер не запускается, даже если `auth` и `mail` заданы конфигом.
+- Секреты в `seed.ts` берите из окружения: `process.env.SERVICE_PASSWORD` и т.п.
+- **`MABASE_*` зарезервировано** за настройками сервера. Своя переменная с таким префиксом
+  вызывает предупреждение «неизвестная переменная» - назовите её иначе (`SERVICE_PASSWORD`,
+  `ADMIN_EMAIL`). Иначе получите пустое значение и долго будете искать причину.
+
+Пример Dockerfile - нужна glibc, поэтому debian, не alpine:
+
+```dockerfile
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+RUN curl -fsSL https://github.com/escanderm/mabase/releases/latest/download/mabase-linux-x64.tar.gz | tar -xz
+COPY mabase.config.ts seed.ts ./
+ENV MABASE_DIR=/data
+VOLUME /data
+EXPOSE 8090
+CMD ["sh", "-c", "./mabase superuser upsert \"$ADMIN_EMAIL\" \"$ADMIN_PASSWORD\" && ./mabase seed && exec ./mabase serve --host 0.0.0.0"]
+```
+
+`mb_data` (или `MABASE_DIR`) - единственное, что нужно бэкапить и монтировать томом.
 
 За обратным прокси (nginx, Caddy):
 - проксируйте и `/api/realtime` - это WebSocket;
