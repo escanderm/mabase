@@ -241,4 +241,17 @@ describe('mabase superuser', () => {
     expect(last.code).toBe(1)
     expect(last.out).toContain('последний администратор')
   }, 60_000)
+  test('135. seed: статическое process.env.MABASE_* предупреждает, а не молча даёт undefined', async () => {
+    const root = project({
+      'seed.ts': `import { defineSeed } from 'mabase'
+export default defineSeed(async () => { console.log('custom:', process.env.MABASE_CUSTOM) })
+`,
+    })
+    const r = await cli(root, 'seed')
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('префикс MABASE_ зарезервирован')
+    expect(r.out).toContain('MABASE_CUSTOM')
+    expect(r.out).toContain('SERVICE_PASSWORD')
+  })
+
 })

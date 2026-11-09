@@ -44,6 +44,24 @@ function registerModule(): void {
   })
 }
 
+// Bun в собранном бинарнике подставляет в статическое process.env.MABASE_*
+// значение с момента сборки - обычно undefined. Предупреждаем заранее: иначе
+// сид молча получает пустой секрет и падает с «не задан».
+function warnReservedEnv(file: string, warnings: string[]): void {
+  let src: string
+  try {
+    src = readFileSync(file, 'utf8')
+  } catch {
+    return
+  }
+  const m = src.match(/process\.env\s*(?:\.\s*(MABASE_[A-Za-z0-9_]+)|\[\s*(['"])(MABASE_[A-Za-z0-9_]+)\2\s*\])/)
+  const name = m?.[1] ?? m?.[3]
+  if (!name) return
+  warnings.push(
+    `${file}: process.env.${name} - префикс MABASE_ зарезервирован: в скомпилированной сборке такое обращение может вернуть undefined. Назовите переменную иначе, например SERVICE_PASSWORD`,
+  )
+}
+
 export type Flags = {
   dir: string
   port: number
@@ -114,7 +132,9 @@ export async function loadProject(
 ): Promise<{ config: ServerConfig; seed?: api.SeedDefinition; hooks: string[]; sources: Record<string, string>; warnings: string[] }> {
   registerModule()
   api.resetApi()
+  const warnings: string[] = []
   const load = async (file: string) => {
+    warnReservedEnv(file, warnings)
     try {
       return await import(file)
     } catch (err) {
@@ -197,7 +217,7 @@ export async function loadProject(
     seed = (await load(seedFile)).default
     if (!seed || typeof seed.seed !== 'function') throw new Error(`${seedFile}: export default defineSeed(...)`)
   }
-  return { config, seed, hooks, sources, warnings: env.warnings }
+  return { config, seed, hooks, sources, warnings: [...warnings, ...env.warnings] }
 }
 
 function mergeOauth(
