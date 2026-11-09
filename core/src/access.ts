@@ -555,6 +555,38 @@ export class ClientCollection {
     })
   }
 
+  // Массовое обновление по фильтру: операторы те же, что у одиночного update.
+  // Каждая запись проходит правила update и проверку полей со своим before -
+  // private/readonly/immutable не должны обходиться пачкой.
+  updateMany(filter: unknown, update: unknown, opts: { limit?: number } = {}): Promise<{ updated: number }> {
+    return clientErrors(async () => {
+      this.s.checkFilter(this.name, filter)
+      if (!filter || typeof filter !== 'object' || Array.isArray(filter)) throw bad('filter - объект; обновить всё - filter: {}')
+      validateUpdate(update)
+      const { defaultLimit, maxLimit } = this.s.access.limits
+      const limit = opts.limit ?? defaultLimit
+      if (!Number.isInteger(limit) || limit < 1) throw bad('limit: целое число больше 0')
+      if (limit > maxLimit) throw bad(`limit больше ${maxLimit}`)
+      const upd = update as Update
+      const fields = Object.values(upd).flatMap((f) => Object.keys(f ?? {}))
+      const db = this.s.access.db
+      return db.transaction(async (tx) => {
+        const view = await this.s.ruleFilter(this.name, 'view', tx.c)
+        const docs = await tx.c[this.name]!.find(and(view, filter), { limit: limit + 1 })
+        if (docs.length > limit) {
+          throw new ActionError('bad_request', `под фильтр попадает больше ${limit} записей: уточните filter или увеличьте limit`)
+        }
+        for (const before of docs) {
+          this.s.checkWrite(this.name, fields, 'update', before)
+          const after = applyUpdate(before, upd)
+          await this.s.check(this.name, 'update', { before, after, db: tx.c })
+          await tx.c[this.name]!.update(before._id, upd)
+        }
+        return { updated: docs.length }
+      }, { user: this.s.user, origin: 'api' })
+    })
+  }
+
   // Массовое удаление по фильтру. Правила те же, что у одиночного remove:
   // каждая запись проходит правило delete, иначе пачка была бы дырой в доступе.
   // limit ограничивает пачку: больше - ошибка, а не молчаливое частичное удаление.

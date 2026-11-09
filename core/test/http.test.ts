@@ -120,6 +120,34 @@ describe('HTTP', () => {
     await db.close()
   })
 
+
+  test('88. массовое обновление по фильтру: правила, limit, без filter - 400', async () => {
+    const { db, call } = await setup()
+    const a = (await call('POST', '/api/auth/register', { body: alice })).body
+    const b = (await call('POST', '/api/auth/register', { body: bob })).body
+    for (const text of ['1', '2', '3']) expect((await call('POST', '/api/c/notes', { token: a.accessToken, body: { text } })).status).toBe(200)
+    await call('POST', '/api/c/notes', { token: b.accessToken, body: { text: 'чужое' } })
+
+    // без filter - 400
+    expect((await call('PATCH', '/api/c/notes', { token: a.accessToken, body: { $set: { text: 'x' } } })).status).toBe(400)
+    // больше limit - 400, ничего не изменилось
+    expect((await call('PATCH', '/api/c/notes' + q({ filter: {}, limit: '2' }), { token: a.accessToken, body: { $set: { text: 'x' } } })).status).toBe(400)
+    expect((await call('GET', '/api/c/notes' + q({ filter: { text: 'x' } }), { token: a.accessToken })).body.items).toHaveLength(0)
+
+    const r = await call('PATCH', '/api/c/notes' + q({ filter: { text: { $in: ['1', '2'] } } }), { token: a.accessToken, body: { $set: { text: 'обновлено' } } })
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({ updated: 2 })
+    expect((await call('GET', '/api/c/notes' + q({ filter: { text: 'обновлено' } }), { token: a.accessToken })).body.items).toHaveLength(2)
+
+    // readonly поле пачкой не проходит
+    expect((await call('PATCH', '/api/c/notes' + q({ filter: {} }), { token: a.accessToken, body: { $set: { ownerId: 'x' } } })).status).toBe(403)
+    // чужое не тронуто
+    expect((await call('GET', '/api/c/notes' + q({ count: '1' }), { token: b.accessToken })).body).toEqual({ count: 1 })
+    // лишний параметр
+    expect((await call('PATCH', '/api/c/notes' + q({ filter: {}, sort: { text: 1 } }), { token: a.accessToken, body: { $set: { text: 'y' } } })).status).toBe(400)
+    await db.close()
+  })
+
   test('87. массовое удаление по фильтру: правила, limit, без filter - 400', async () => {
     const { db, call } = await setup()
     const a = (await call('POST', '/api/auth/register', { body: alice })).body
