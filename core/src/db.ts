@@ -310,7 +310,7 @@ export class Db {
   }
 
   static async open(opts: DbOptions): Promise<Db> {
-    const disk = new Disk(opts.dir, opts.fsync ?? true)
+    const disk = new Disk(opts.dir, opts.fsync ?? true, opts.onWarning ?? ((m) => console.warn(`[mabase] ${m}`)))
     const { data, lastTx, droppedTailBytes } = await disk.open()
     return new Db(disk, data, lastTx, droppedTailBytes, opts)
   }

@@ -76,7 +76,10 @@ export type Flags = {
   given: { dir?: boolean; port?: boolean; host?: boolean; public?: boolean } // что задано флагом (приоритет над env)
 }
 
-export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags: Flags } {
+export function parseArgs(
+  argv: string[],
+  env: Record<string, string | undefined> = process.env,
+): { cmd: string; args: string[]; flags: Flags } {
   const args: string[] = []
   const raw: Record<string, string> = {}
   let dev = false
@@ -96,14 +99,19 @@ export function parseArgs(argv: string[]): { cmd: string; args: string[]; flags:
     } else args.push(a)
   }
   const root = resolve(raw.root ?? process.cwd())
+  const cmd = args.shift() ?? 'help'
+  // MABASE_DIR действует во всех командах, а не только в serve: иначе backup,
+  // seed и superuser молча работают с дефолтной mb_data (issue #4).
+  const envDir =
+    raw.dir === undefined && !['help', 'version', 'update'].includes(cmd) ? readEnv(env).overrides.dir : undefined
   const port = raw.port === undefined ? 8090 : Number(raw.port)
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new UsageError('--port: число от 0 до 65535')
   return {
-    cmd: args.shift() ?? 'help',
+    cmd,
     args,
     flags: {
       root,
-      dir: resolve(root, raw.dir ?? 'mb_data'),
+      dir: envDir ?? resolve(root, raw.dir ?? 'mb_data'),
       port,
       host: raw.host,
       public: raw.public && resolve(root, raw.public),

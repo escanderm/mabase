@@ -59,6 +59,35 @@ describe('защита данных', () => {
     await (await openDb({ dir })).close()
   })
 
+  test('15d. LOCK с опознанием процесса: чужой PID-namespace и старый pid отпускаются', async () => {
+    const dir = tmpDir('lock')
+    await (await openDb({ dir })).close()
+    const linux = existsSync('/proc/self/ns/pid')
+    const boot = linux ? readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() : ''
+    const own = () => {
+      const stat = readFileSync(`/proc/${process.pid}/stat`, 'utf8')
+      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+      return { start: rest[19]!, ns: readFileSync('/proc/self/ns/pid', 'utf8').trim() }
+    }
+
+    // мёртвый pid в новом формате - забираем на любой платформе
+    writeFileSync(join(dir, 'LOCK'), JSON.stringify({ v: 1, pid: 999999, boot, start: '', pidns: '' }) + '\n')
+    await (await openDb({ dir })).close()
+
+    if (!linux) return // дальше проверки только для /proc
+    const me = own()
+    // тот же pid, но другое время старта (pid переиспользован) - устарел
+    writeFileSync(join(dir, 'LOCK'), JSON.stringify({ v: 1, pid: process.pid, boot, start: '0', pidns: me.ns }) + '\n')
+    await (await openDb({ dir })).close()
+    // тот же pid и старт, но другой PID-namespace (контейнер) - устарел
+    writeFileSync(join(dir, 'LOCK'), JSON.stringify({ v: 1, pid: process.pid, boot, start: me.start, pidns: 'pid:[0]' }) + '\n')
+    await (await openDb({ dir })).close()
+    // тот же pid, старт и namespace - это мы, замок держит
+    writeFileSync(join(dir, 'LOCK'), JSON.stringify({ v: 1, pid: process.pid, boot, start: me.start, pidns: me.ns }) + '\n')
+    expect(await openDb({ dir }).catch((e) => e)).toBeInstanceOf(LockedError)
+    unlinkSync(join(dir, 'LOCK'))
+  })
+
   test('16. чужие файлы в папке не мешают и не удаляются', async () => {
     const dir = tmpDir('foreign')
     mkdirSync(join(dir, 'files'), { recursive: true })

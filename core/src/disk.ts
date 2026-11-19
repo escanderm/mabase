@@ -12,6 +12,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   readSync,
   renameSync,
   unlinkSync,
@@ -51,6 +52,82 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+// Опознание процесса для LOCK. В контейнере у каждого свой PID-namespace,
+// поэтому pid 1 всегда «жив» для нового контейнера: без этих полей замок
+// от убитого пода не отличить от живого владельца (issue #4).
+type LockInfo = { v: 1; pid: number; boot: string; start: string; pidns: string }
+
+function bootId(): string {
+  try {
+    return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+  } catch {
+    return '' // не Linux - проверяем только pid
+  }
+}
+
+// Поле 22 из /proc/<pid>/stat: время старта в тиках после загрузки.
+function procStart(pid: number): string {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return rest[19] ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function pidNamespace(): string {
+  try {
+    return readlinkSync('/proc/self/ns/pid')
+  } catch {
+    return ''
+  }
+}
+
+function describeLock(raw: string): { pid: number | null; info: LockInfo | null } {
+  if (!raw) return { pid: null, info: null }
+  if (/^\d+$/.test(raw)) return { pid: Number(raw), info: null }
+  try {
+    const o = JSON.parse(raw)
+    if (o && o.v === 1 && Number.isInteger(o.pid) && o.pid > 0) {
+      return { pid: o.pid, info: { v: 1, pid: o.pid, boot: String(o.boot ?? ''), start: String(o.start ?? ''), pidns: String(o.pidns ?? '') } }
+    }
+  } catch {}
+  return { pid: null, info: null }
+}
+
+// Замок держат: pid жив и это тот же процесс (то же время старта, тот же namespace).
+// Иначе возвращаем причину, по которой замок устарел.
+function staleReason(raw: string): string | null {
+  const { pid, info } = describeLock(raw)
+  const boot = bootId()
+  const ns = pidNamespace()
+  if (info) {
+    if (info.boot && boot && info.boot !== boot) return 'замок от другой загрузки'
+    if (!pidAlive(info.pid)) return 'процесс не существует'
+    if (info.start) {
+      const now = procStart(info.pid)
+      if (now && now !== info.start) return 'pid переиспользован другим процессом'
+    }
+    if (info.pidns && ns && info.pidns !== ns) return 'владелец в другом PID-namespace (контейнер)'
+    return null
+  }
+  // Старый формат - только pid. В контейнере pid 1 нового пода не имеет
+  // отношения к владельцу, поэтому смотрим, похож ли процесс на mabase.
+  if (pid === null) return 'замок нечитаем'
+  if (!pidAlive(pid)) return 'процесс не существует'
+  try {
+    const cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+    if (cmd && !cmd.includes('mabase')) return `pid ${pid} занят другим процессом`
+  } catch {}
+  return null
+}
+
+function lockContent(pid = process.pid): string {
+  const info: LockInfo = { v: 1, pid, boot: bootId(), start: procStart(pid), pidns: pidNamespace() }
+  return JSON.stringify(info) + '\n'
+}
+
 export function applyToData(data: Data, ops: LogOp[]): void {
   for (const op of ops) {
     let coll = data.get(op.c)
@@ -78,6 +155,7 @@ export class Disk {
   constructor(
     readonly dir: string,
     private fsync: boolean,
+    private onStale?: (message: string) => void,
   ) {}
 
   private p(name: string): string {
@@ -135,24 +213,28 @@ export class Disk {
   }
 
   // Один писатель на папку. Замок от умершего процесса (kill -9) забираем.
+  // В LOCK пишем не только pid, но и boot_id, время старта и PID-namespace:
+  // в контейнере pid 1 нового пода всегда «жив», и без этого замок убитого
+  // контейнера не отличить от живого владельца.
   private acquireLock(): void {
     const path = this.p('LOCK')
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const fd = openSync(path, 'wx')
-        writeSync(fd, `${process.pid}\n`)
+        writeSync(fd, lockContent())
         this.lockFd = fd
         return
       } catch (err: any) {
         if (err.code !== 'EEXIST') throw err
       }
       const content = readFileSync(path, 'utf8').trim()
-      const pid = Number(content)
       if (content === '') {
         // другой процесс только что создал замок и ещё не записал pid
         if (Date.now() - statSync(path).mtimeMs < STALE_EMPTY_LOCK_MS) throw new LockedError(path, null)
-      } else if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) {
-        throw new LockedError(path, pid)
+      } else {
+        const reason = staleReason(content)
+        if (reason === null) throw new LockedError(path, describeLock(content).pid)
+        this.onStale?.(`замок ${path} устарел (${reason}) - беру на себя`)
       }
       unlinkSync(path)
     }

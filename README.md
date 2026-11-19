@@ -912,6 +912,9 @@ curl -s -X DELETE "$BASE/api/c/notes?filter=%7B%22status%22%3A%22old%22%7D" -H "
 - `--public mb_public` - папка статики.
 
 Переменные окружения:
+- `MABASE_DIR` - папка данных. Действует **во всех командах**, не только в `serve`:
+  `backup`, `seed`, `superuser`, `import`, `tail` берут её, если не передан `--dir`
+  (флаг главнее окружения);
 - `MABASE_SECRET` - ключ подписи токенов вместо `mb_data/secret.key`, не короче 32 символов;
 - `MABASE_UPDATE_URL` - откуда брать обновления, для своих сборок.
 
@@ -975,6 +978,28 @@ CMD ["sh", "-c", "./mabase superuser upsert \"$ADMIN_EMAIL\" \"$ADMIN_PASSWORD\"
 ```
 
 `mb_data` (или `MABASE_DIR`) - единственное, что нужно бэкапить и монтировать томом.
+
+### Kubernetes и контейнеры
+
+```yaml
+env:
+  - name: MABASE_DIR
+    value: /data
+volumeMounts:
+  - { name: data, mountPath: /data }
+```
+
+- `MABASE_DIR` понимают и сервер, и CLI-команды - отдельный `--dir` не нужен.
+- Entrypoint: `superuser upsert` → `seed` → `exec mabase serve` (см. «Headless»).
+  Все три работают с `/data` из окружения.
+- **LOCK** хранит не только pid, но и `boot_id`, время старта процесса и PID-namespace.
+  Поэтому замок убитого контейнера снимается сам: `pid 1` нового пода больше не
+  считается его владельцем. В журнал уходит предупреждение «замок устарел - беру на себя».
+- `terminationGracePeriodSeconds` дайте с запасом (30–60 с): штатное закрытие снимает
+  замок само, а жёсткий `kill -9` оставляет его на томе - теперь он снимается при старте.
+- **Одна реплика и `Recreate`.** Замок отличает мёртвого владельца от живого в том же
+  namespace; два пода на одной папке (RWO-том) по-прежнему нельзя - второй сочтёт замок
+  из другого namespace устаревшим и заберёт его.
 
 За обратным прокси (nginx, Caddy):
 - проксируйте и `/api/realtime` - это WebSocket;

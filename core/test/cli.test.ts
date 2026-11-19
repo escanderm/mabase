@@ -241,6 +241,32 @@ describe('mabase superuser', () => {
     expect(last.code).toBe(1)
     expect(last.out).toContain('последний администратор')
   }, 60_000)
+  test('136. CLI следует MABASE_DIR во всех командах, флаг --dir главнее окружения', async () => {
+    const root = project()
+    const data = join(root, 'data-from-env')
+    const p = Bun.spawn(['bun', CLI, 'seed', '--root', root], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, MABASE_DIR: data },
+    })
+    await p.exited
+    expect(p.exitCode).toBe(0)
+    expect(existsSync(join(data, 'db', 'CURRENT'))).toBe(true)
+    expect(existsSync(join(root, 'mb_data'))).toBe(false)
+
+    // флаг --dir сильнее окружения
+    const other = join(root, 'data-from-flag')
+    const p2 = Bun.spawn(['bun', CLI, 'seed', '--root', root, '--dir', other], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, MABASE_DIR: join(root, 'data-ignored') },
+    })
+    await p2.exited
+    expect(p2.exitCode).toBe(0)
+    expect(existsSync(join(other, 'db', 'CURRENT'))).toBe(true)
+    expect(existsSync(join(root, 'data-ignored'))).toBe(false)
+  })
+
   test('135. seed: статическое process.env.MABASE_* предупреждает, а не молча даёт undefined', async () => {
     const root = project({
       'seed.ts': `import { defineSeed } from 'mabase'
