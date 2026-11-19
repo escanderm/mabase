@@ -2,7 +2,7 @@
 // устаревший CURRENT, режим "только чтение", предупреждения, заморозка onCommit.
 // Добавлены после ревью коллеги: каждая из этих проблем была воспроизведена до исправления.
 import { describe, expect, test } from 'bun:test'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '../src/db'
 import { CorruptionError, LockedError, ReadOnlyError } from '../src/errors'
@@ -67,7 +67,7 @@ describe('защита данных', () => {
     const own = () => {
       const stat = readFileSync(`/proc/${process.pid}/stat`, 'utf8')
       const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-      return { start: rest[19]!, ns: readFileSync('/proc/self/ns/pid', 'utf8').trim() }
+      return { start: rest[19]!, ns: readlinkSync('/proc/self/ns/pid') }
     }
 
     // мёртвый pid в новом формате - забираем на любой платформе
