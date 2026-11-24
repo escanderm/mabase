@@ -236,10 +236,15 @@ export class CollectionApi {
   }
 
   // Одна транзакция. Про большие удаления - design.md §10.
+  // Документ, который каскад уже снял раньше в этой же пачке (связь коллекции
+  // на себя), пропускаем. Иначе remove не находит id и откатывает всё дерево.
   removeMany(filter: Query): Promise<number> {
     return this.write(async (tx) => {
       const found = await this.db._find(tx, this.name, filter, { fields: ['_id'], unordered: true })
-      for (const d of found) await this.db._remove(tx, this.name, d._id)
+      for (const d of found) {
+        if (!this.db._has(tx, this.name, d._id)) continue
+        await this.db._remove(tx, this.name, d._id)
+      }
       return found.length
     })
   }
@@ -650,6 +655,11 @@ export class Db {
     const ov = tx?.overlay.get(c)
     if (ov?.has(id)) return ov.get(id) ?? null
     return this.data.get(c)?.get(id) ?? null
+  }
+
+  // Ещё есть в этой транзакции. null в overlay - уже удалён, в том числе каскадом.
+  _has(tx: Tx, c: string, id: string): boolean {
+    return this.get(tx, c, id) !== null
   }
 
   private stage(tx: Tx, c: string, id: string, doc: Doc | null): void {

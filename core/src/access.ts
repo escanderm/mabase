@@ -606,7 +606,12 @@ export class ClientCollection {
           throw new ActionError('bad_request', `под фильтр попадает больше ${limit} записей: уточните filter или увеличьте limit`)
         }
         for (const doc of docs) await this.s.check(this.name, 'delete', { before: doc, db: tx.c })
-        for (const doc of docs) await tx.c[this.name]!.remove(doc._id)
+        for (const doc of docs) {
+          // Каскад родителя из этой же пачки уже удалил запись. Повторный remove
+          // дал бы «не найден» и откатил бы всё, хотя фильтр как раз про эти id.
+          if (!(await tx.c[this.name]!.findOne({ _id: doc._id }, { fields: ['_id'] }))) continue
+          await tx.c[this.name]!.remove(doc._id)
+        }
         return { deleted: docs.length }
       }, { user: this.s.user, origin: 'api' })
     })

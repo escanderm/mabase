@@ -1,6 +1,7 @@
 // Связи между коллекциями: проверка ссылок, onDelete, expand через правила,
 // связи из конфига и из админки.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { Access } from '../src/access'
 import { openDb, type Db } from '../src/db'
 import { createClient } from '../src/client'
 import { startServer, type RunningServer } from '../src/server'
@@ -78,6 +79,30 @@ describe('связи в ядре', () => {
     for (let i = 1; i <= 5; i++) await db.c.chain!.insert({ _id: `n${i}`, parent: `n${i - 1}` })
     await expect(db.c.chain!.remove('n0')).rejects.toThrow('Глубина')
     expect(await db.c.chain!.count()).toBe(6)
+    await db.close()
+  })
+
+  test('217. removeMany и drop дерева со связью на себя не откатывают пачку', async () => {
+    const db = await openDb({ dir: tmpDir('rel-tree'), fsync: false })
+    db.collection('chain', { relations: { parent: { to: 'chain', onDelete: 'cascade' } } })
+    await db.c.chain!.insert({ _id: 'a' })
+    await db.c.chain!.insert({ _id: 'b', parent: 'a' })
+    await db.c.chain!.insert({ _id: 'c', parent: 'b' })
+    // родитель по _id раньше ребёнка - как ULID. Раньше пачка падала на втором id.
+    await expect(db.c.chain!.remove('missing')).rejects.toThrow('chain/missing не найден')
+    expect(await db.c.chain!.count()).toBe(3)
+
+    const access = new Access(db, {
+      chain: { rules: { list: () => true, view: () => true, delete: () => true } },
+    })
+    expect(await access.forUser({ id: 'u' }).c.chain!.removeMany({})).toEqual({ deleted: 3 })
+    expect(await db.c.chain!.count()).toBe(0)
+
+    await db.c.chain!.insert({ _id: 'a' })
+    await db.c.chain!.insert({ _id: 'b', parent: 'a' })
+    expect(await db.drop('chain')).toBe(2)
+    expect(await db.c.chain!.count()).toBe(0)
+    expect(db.isDeclared('chain')).toBe(false)
     await db.close()
   })
 })
